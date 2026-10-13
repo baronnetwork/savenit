@@ -1,0 +1,32 @@
+# secrets / credentials
+*.env
+.env*
+*credentials*
+*secret*
+*.pem
+*.key
+id_*
+!id_*.pub
+*_token*
+*.tfstate
+*.tfstate.*
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+.vscode/
+.idea/
+.css-slug
+
+# language / tool artifacts
+__pycache__/
+*.pyc
+node_modules/
+.venv/
+venv/
+*.log
+
+# local-only project scaffolding
+docs/
+old-backups/

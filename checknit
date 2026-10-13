@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+NITDIR="$HOME/claude-busywork"
+
+etime_human() {
+    # ps etime formats: mm:ss, hh:mm:ss, dd-hh:mm:ss
+    local e="$1" d=0 h=0 m=0 a b c
+    if [[ "$e" == *-* ]]; then
+        d="${e%%-*}"
+        e="${e#*-}"
+    fi
+    IFS=: read -r a b c <<< "$e"
+    if [[ -n "${c:-}" ]]; then
+        h="$a"; m="$b"
+    else
+        m="$a"
+    fi
+    d=$((10#${d:-0})); h=$((10#${h:-0})); m=$((10#${m:-0}))
+    if (( d > 0 )); then echo "${d}d ${h}h"
+    elif (( h > 0 )); then echo "${h}h ${m}m"
+    else echo "${m} min"; fi
+}
+
+etime_seconds() {
+    # prefer ps etimes; derive from etime string if the platform lacks it
+    local pid="$1" secs e d=0 h=0 m=0 s=0 a b c
+    secs=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')
+    if [[ -n "$secs" ]]; then echo "$secs"; return; fi
+    e=$(ps -o etime= -p "$pid" 2>/dev/null | tr -d ' ')
+    [[ "$e" == *-* ]] && { d="${e%%-*}"; e="${e#*-}"; }
+    IFS=: read -r a b c <<< "$e"
+    if [[ -n "${c:-}" ]]; then h="$a"; m="$b"; s="$c"
+    else m="$a"; s="$b"; fi
+    echo $(( 10#${d:-0}*86400 + 10#${h:-0}*3600 + 10#${m:-0}*60 + 10#${s:-0} ))
+}
+
+# Working: claude processes with a nit path in argv
+# S_PIDS: agents past 5 minutes, offered for killing at the end
+declare -a W_LINES=()
+declare -a W_NITS=()
+declare -a S_PIDS=()
+while IFS= read -r line; do
+    pid="${line%% *}"
+    nit=$(grep -oE "$NITDIR/new-nit-[0-9-]+\.md" <<< "${line#* }" | head -1 || true)
+    [[ -z "$nit" ]] && continue
+    etime=$(ps -o etime= -p "$pid" 2>/dev/null | tr -d ' ')
+    esecs=$(etime_seconds "$pid")
+    (( esecs > 300 )) && S_PIDS+=("$pid")
+    log="${nit%.md}-agent.log"
+    W_LINES+=("PID $pid  running $(etime_human "${etime:-00:00}")  $nit")
+    W_LINES+=("    log:   $log")
+    if (( esecs > 600 )); then
+        W_LINES+=("    STALE: over 10 min, last 5 log lines:")
+        while IFS= read -r tl; do
+            W_LINES+=("      | $tl")
+        done < <(tail -5 "$log" 2>/dev/null || true)
+    fi
+    W_LINES+=("")
+    W_NITS+=("$nit")
+done < <(pgrep -fl 'claude.*new-nit' 2>/dev/null || true)
+
+# Backlog: non-DONE nits nobody is working
+declare -a B_LINES=()
+while IFS= read -r f; do
+    grep -q "Issue status: DONE" "$f" 2>/dev/null && continue
+    skip=0
+    for w in ${W_NITS[@]+"${W_NITS[@]}"}; do
+        [[ "$w" == "$f" ]] && { skip=1; break; }
+    done
+    (( skip )) && continue
+    base=$(basename "$f")
+    stamp=${base#new-nit-}; stamp=${stamp%.md}
+    B_LINES+=("${stamp:0:10} ${stamp:11:2}:${stamp:14:2}  $f")
+done < <(ls -r "$NITDIR"/new-nit-*.md 2>/dev/null || true)
+
+echo
+echo "# Working (${#W_NITS[@]})"
+echo
+for l in ${W_LINES[@]+"${W_LINES[@]}"}; do echo "$l"; done
+echo "# Backlog (${#B_LINES[@]})"
+echo
+for l in ${B_LINES[@]+"${B_LINES[@]}"}; do echo "$l"; done
+echo
+
+if (( ${#W_NITS[@]} > 0 || ${#B_LINES[@]} > 0 )); then
+    echo "Interrupt an agent:  kill <PID>"
+    echo "Work the next nit:   fixnit"
+else
+    echo "Nothing pending. Either you're out of complaints or you've gone numb."
+fi
+
+echo
+echo "# Directory ($NITDIR)"
+echo
+ls -lhA "$NITDIR"
+
+# Offer clemency hearing for agents past 5 minutes (interactive only)
+if [[ -t 0 && ${#S_PIDS[@]} -gt 0 ]]; then
+    echo
+    printf 'Do you want me to kill the processes older than 5 minutes?  Y/N '
+    KREPLY=""
+    read -t 10 -r -n 1 KREPLY || true
+    if [[ "$KREPLY" =~ ^[yY]$ ]]; then
+        printf '\n'
+        for p in "${S_PIDS[@]}"; do
+            kill "$p" 2>/dev/null && echo "Killed PID $p" || echo "PID $p already gone"
+        done
+    else
+        printf '\n\n%s\n' "You are too kind sir, to give us this chance."
+    fi
+fi

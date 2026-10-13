@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+NITDIR="$HOME/claude-busywork"
+MODE="standard"
+[[ "${1:-}" == "-lite" || "${1:-}" == "--lite" ]] && MODE="lite"
+if [[ "$MODE" == "lite" ]]; then
+    AGENT_DESC="Kimi-K3-lab-claude-compatible[1m] / effort high / --bare / via LiteLLM"
+else
+    AGENT_DESC="claude-sonnet-4-6 / direct"
+fi
+
+# Nits currently assigned to a running agent (same trick checknit uses)
+WORKING=$(pgrep -fl 'claude.*new-nit' 2>/dev/null | grep -oE "$NITDIR/new-nit-[0-9-]+\.md" || true)
+
+# Find most recent new-nit-*.md not internally marked DONE and not already being worked
+NITFILE=""
+while IFS= read -r f; do
+    grep -q "Issue status: DONE" "$f" 2>/dev/null && continue
+    [[ -n "$WORKING" ]] && grep -qF "$f" <<< "$WORKING" && continue
+    NITFILE="$f"
+    break
+done < <(ls -r "$NITDIR"/new-nit-*.md 2>/dev/null)
+
+if [[ -z "$NITFILE" ]]; then
+    echo "No pending nit files. Either you fixed everything or you forgot to complain."
+    exit 0
+fi
+
+LOGFILE="${NITFILE%.md}-agent.log"
+PROMPT="Read the nit file at ${NITFILE} and implement all agent instructions in it autonomously. The nit file is your complete specification. The 'Where it happened' directory marks where the complaint was filed, not necessarily where the fix belongs; follow the evidence."
+
+# Ground the agent in the directory the complaint was filed from; old nits or
+# vanished directories fall back to the nit directory
+WORKDIR=$(grep -m1 '## Where it happened' "$NITFILE" | sed 's/.*: *//' || true)
+[[ -d "${WORKDIR:-}" ]] || WORKDIR="$NITDIR"
+
+echo "Mode:  $MODE"
+echo "Nit:   $NITFILE"
+echo "Log:   $LOGFILE"
+echo "From:  $WORKDIR"
+echo "Agent: starting..."
+
+cd "$WORKDIR"
+
+if [[ "$MODE" == "lite" ]]; then
+    # Same launch shape as css-v3.sh -lite: LiteLLM proxy, Kimi K3, effort high.
+    if ! command -v lite >/dev/null 2>&1; then
+        echo "Missing 'lite' CLI. Install: pipx install 'litellm[proxy]', then: lite login" >&2
+        exit 1
+    fi
+    if lite auth print-token 2>&1 | grep -qiE 'expired|not logged|run.*login|login.*again|no.*token|unauthorized'; then
+        echo "LiteLLM token expired. Run: lite login" >&2
+        exit 1
+    fi
+    lite claude --bare --dangerously-skip-permissions \
+        --model "Kimi-K3-lab-claude-compatible[1m]" --effort high \
+        --settings '{"model":"Kimi-K3-lab-claude-compatible[1m]"}' \
+        -p "$PROMPT" \
+        >> "$LOGFILE" 2>&1 &
+else
+    claude --model claude-sonnet-4-6 --dangerously-skip-permissions \
+        -p "$PROMPT" \
+        >> "$LOGFILE" 2>&1 &
+fi
+
+echo "PID:   $!"
+
+# fixnit writes the audit stamp itself; agent self-reports are decorative
+printf '\n## fixnit audit stamp: mode=%s agent=%s pid=%s started=%s\n' \
+    "$MODE" "$AGENT_DESC" "$!" "$(date '+%Y-%m-%d %H:%M')" >> "$NITFILE"

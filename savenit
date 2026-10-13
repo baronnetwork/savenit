@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -eq 0 ]]; then
+    # Interactive prompt mode -- avoids shell parsing of parens/special chars
+    # when the user types: savenit (some thing in parens) without quotes
+    if [[ -t 0 ]]; then
+        printf 'What is annoying you? '
+        read -r -e COMPLAINT
+        if [[ -z "$COMPLAINT" ]]; then
+            echo "Usage: savenit \"what is annoying you\"" >&2
+            echo "  or:  savenit   (then type at the prompt)" >&2
+            exit 1
+        fi
+    else
+        echo "Usage: savenit \"what is annoying you\"" >&2
+        echo "  or:  savenit   (then type at the prompt)" >&2
+        exit 1
+    fi
+else
+    COMPLAINT="$*"
+fi
+DATE=$(date '+%Y-%m-%d')
+TIME=$(date '+%H:%M')
+TIMESTAMP="${DATE}-$(date '+%H-%M')"
+HOST=$(hostname)
+OS_TYPE=$(sw_vers -productVersion 2>/dev/null || uname -rs)
+CAPTURED=""
+if [[ -t 0 ]]; then
+    printf 'Grab clipboard? [Y/n] '
+    read -r -n 1 REPLY
+    printf '\n'
+    if [[ ! "$REPLY" =~ ^[nN]$ ]]; then
+        CAPTURED=$(pbpaste 2>/dev/null || true)
+    fi
+else
+    # Non-interactive stdin: keep original copy-then-command behavior
+    CAPTURED=$(pbpaste 2>/dev/null || true)
+fi
+OUTFILE="$HOME/claude-busywork/new-nit-${TIMESTAMP}.md"
+
+AGENT_INSTRUCTIONS="${COMPLAINT}"
+if [[ -n "$CAPTURED" ]]; then
+    AGENT_INSTRUCTIONS="${COMPLAINT}
+
+Captured output for context:
+${CAPTURED}"
+fi
+
+cat > "$OUTFILE" << TEMPLATE
+# NitFile - for fixing the pesky things while bored
+
+# Human complaint:
+
+${COMPLAINT}
+
+## Issue status: NEW
+
+## When it happened: ${DATE} at ${TIME} on ${HOST} (${OS_TYPE})
+
+## Where it happened (invoked from): ${PWD}
+
+## When was it fixed:
+
+# Human prompt for the AI agent on what action to take:
+
+${AGENT_INSTRUCTIONS}
+
+# AI agent question back to the human
+
+Maximum two questions, pick the most important 1 or 2 questions needed to unblock.  Small issues, I leave it to the AI to decide what is best.
+
+(In bullets, no more than 2 bullets, no more than 5-20 words per bullet)
+
+# AI resolution summary
+
+(In bullets, no more than 5 bullets, no more than 5-20 words per bullet)
+
+# List of files to be edited and their backups, and sizes
+
+filename.sh - 2600 bytes
+filename-autoAgenticNitFix.sh - 2600 bytes
+
+# List of files that were edited and their new sizes, and their backups and their sizes, and the changelog of what was changed
+
+filename.sh - 3821 bytes
+filename-autoAgenticNitFix-backup.sh - 2600 bytes
+filename-autoAgenticNitFix-changelog.md
+
+
+# Steps for the AI agent to take after addressing the prompt
+
+## Change issue status
+status states allowed are:
+NEW -> REVIEW -> INPROGRESS -> PENDINGHUMAN -> DONE
+                            -> QA -> DONE
+
+if the AI can self validate the issue is resolved via some minimal QA, it can move to DONE
+
+# Make a plan and resolve the issue
+
+## If human questions are needed, AI agent is to ask advisor if available to see if it can make an informed decision on how to proceed, assuming it is safe
+
+## Any changes to existing shell scripts, or configuration files, are to be backed up first
+
+backup name:
+
+filename.sh
+copied to filename-autoAgenticNitFix-Backup.sh
+
+## Validate the backup exists and matches file size
+
+## Document the list of files to be edited and their backup in this file
+
+## Create a filename-autoAgenticNitFix-proposed-changelog.md which has no more than 5 bullets of 5-20 words each about what is to be changed and why.  First bullet says "History and current status: <absolute path to nitfile>"
+
+## Implement the changes
+
+## After implementing the change, spawn a sonnet subagent to test the change or validate the fix to the best of the ability
+update the nitFile with the # AI resolution summary
+
+## After implementing the change, spawn a sonnet subagent to update the proposed_changelog.md as needed if something changed in the plan, and update the nitFile with the # AI resolution summary
+
+## After the issue is fully resolved and tested
+
+spawn a subagent to:
+1/ Rename filename-autoAgenticNitFix-proposed-changelog.md to filename-autoAgenticNitFix-changelog.md
+2/ Update the NitFile status field issueStatus to DONE
+3/ Update the Nitfile status field whenFixed to ${DATE} at ${TIME} by <model>
+4/ Rename the Nitfile from new-nit-${TIMESTAMP}.md to done-nit-${TIMESTAMP}.md
+TEMPLATE
+
+LINE_COUNT=$(echo "$CAPTURED" | wc -l | tr -d ' ')
+if [[ -n "$CAPTURED" ]]; then
+    echo "Validated pbcopy got your clipboard: ${LINE_COUNT} lines"
+fi
+echo "Saved your nit.  Fix it with fixnit."
