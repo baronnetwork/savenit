@@ -60,6 +60,25 @@ if [[ -z "$NITFILE" ]]; then
     exit 0
 fi
 
+# Ground the agent in the directory the complaint was filed from; old nits or
+# vanished directories fall back to the nit directory
+WORKDIR=$(grep -m1 '## Where it happened' "$NITFILE" | sed 's/.*: *//' || true)
+[[ -d "${WORKDIR:-}" ]] || WORKDIR="$NITDIR"
+
+# Lock gate: any *.lock dir in the workdir means a file there is owned by a
+# running (or crashed) agent. Refuse before renaming the nit, so a turned-away
+# nit stays selectable as new-nit-*. A stale lock from a crash is a breadcrumb:
+# inspect it, then rmdir it by hand.
+shopt -s nullglob
+locks=( "$WORKDIR"/*.lock )
+shopt -u nullglob
+if (( ${#locks[@]} > 0 )); then
+    echo "Refusing to launch: active file lock(s) in $WORKDIR:"
+    printf '  %s\n' "${locks[@]}"
+    echo "Another agent is editing there. If the holder is dead, rmdir the lock manually."
+    exit 1
+fi
+
 # Rename marks the nit as claimed; skip for files already past that stage
 if [[ $(basename "$NITFILE") == new-nit-* ]]; then
     INPROGRESS="${NITFILE/new-nit-/inprogress-nit-}"
@@ -69,11 +88,6 @@ fi
 
 LOGFILE="${NITFILE%.md}-agent.log"
 PROMPT="Read the nit file at ${NITFILE} and implement all agent instructions in it autonomously. The nit file is your complete specification. The 'Where it happened' directory marks where the complaint was filed, not necessarily where the fix belongs; follow the evidence."
-
-# Ground the agent in the directory the complaint was filed from; old nits or
-# vanished directories fall back to the nit directory
-WORKDIR=$(grep -m1 '## Where it happened' "$NITFILE" | sed 's/.*: *//' || true)
-[[ -d "${WORKDIR:-}" ]] || WORKDIR="$NITDIR"
 
 echo "Mode:  $MODE"
 echo "Nit:   $NITFILE"

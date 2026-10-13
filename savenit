@@ -110,6 +110,13 @@ if the AI can self validate the issue is resolved via some minimal QA, it can mo
 
 # Make a plan and resolve the issue
 
+## Lock every file you intend to edit BEFORE touching it
+
+For each file: run mkdir <filename>.lock
+If mkdir fails, another agent owns that file. Do NOT edit it. Record the conflict in this nit, set status PENDINGHUMAN, and stop.
+After ALL edits are complete and validated: rmdir each lock you created.
+Never remove a lock you did not create. Never edit a file whose .lock exists.
+
 ## If human questions are needed, AI agent is to ask advisor if available to see if it can make an informed decision on how to proceed, assuming it is safe
 
 ## Any changes to existing shell scripts, or configuration files, are to be backed up first
