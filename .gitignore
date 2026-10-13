@@ -28,5 +28,4 @@ venv/
 *.log
 
 # local-only project scaffolding
-docs/
 old-backups/
