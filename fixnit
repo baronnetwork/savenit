@@ -3,28 +3,68 @@ set -euo pipefail
 
 NITDIR="$HOME/claude-busywork"
 MODE="standard"
-[[ "${1:-}" == "-lite" || "${1:-}" == "--lite" ]] && MODE="lite"
+NITFILE=""
+
+# Optional explicit target: fixnit <nitfile> works that one file instead of
+# globbing the newest. Bare names resolve inside $NITDIR.
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -lite|--lite) MODE="lite" ;;
+        -h|--help)
+            echo "Usage: fixnit [-lite] [nitfile]"
+            echo "  no args   work the newest unassigned new-nit-*.md"
+            echo "  nitfile   work that specific file (name or path)"
+            exit 0
+            ;;
+        *)
+            if [[ "$1" == */* ]]; then
+                NITFILE="$1"
+            else
+                NITFILE="$NITDIR/$1"
+            fi
+            ;;
+    esac
+    shift
+done
 if [[ "$MODE" == "lite" ]]; then
     AGENT_DESC="Kimi-K3-lab-claude-compatible[1m] / effort high / --bare / via LiteLLM"
 else
     AGENT_DESC="claude-sonnet-4-6 / direct"
 fi
 
-# Nits currently assigned to a running agent (same trick checknit uses)
-WORKING=$(pgrep -fl 'claude.*new-nit' 2>/dev/null | grep -oE "$NITDIR/new-nit-[0-9-]+\.md" || true)
+if [[ -n "$NITFILE" ]]; then
+    # Explicit target: user owns the choice; just sanity-check it
+    if [[ ! -f "$NITFILE" ]]; then
+        echo "No such nit file: $NITFILE" >&2
+        exit 1
+    fi
+    if grep -q "Issue status: DONE" "$NITFILE" 2>/dev/null; then
+        echo "That nit is already DONE: $NITFILE" >&2
+        exit 1
+    fi
+else
+    # Nits currently assigned to a running agent (same trick checknit uses)
+    WORKING=$(pgrep -fl 'claude.*new-nit' 2>/dev/null | grep -oE "$NITDIR/new-nit-[0-9-]+\.md" || true)
 
-# Find most recent new-nit-*.md not internally marked DONE and not already being worked
-NITFILE=""
-while IFS= read -r f; do
-    grep -q "Issue status: DONE" "$f" 2>/dev/null && continue
-    [[ -n "$WORKING" ]] && grep -qF "$f" <<< "$WORKING" && continue
-    NITFILE="$f"
-    break
-done < <(ls -r "$NITDIR"/new-nit-*.md 2>/dev/null)
+    # Find most recent new-nit-*.md not internally marked DONE and not already being worked
+    while IFS= read -r f; do
+        grep -q "Issue status: DONE" "$f" 2>/dev/null && continue
+        [[ -n "$WORKING" ]] && grep -qF "$f" <<< "$WORKING" && continue
+        NITFILE="$f"
+        break
+    done < <(ls -r "$NITDIR"/new-nit-*.md 2>/dev/null)
+fi
 
 if [[ -z "$NITFILE" ]]; then
     echo "No pending nit files. Either you fixed everything or you forgot to complain."
     exit 0
+fi
+
+# Rename marks the nit as claimed; skip for files already past that stage
+if [[ $(basename "$NITFILE") == new-nit-* ]]; then
+    INPROGRESS="${NITFILE/new-nit-/inprogress-nit-}"
+    mv "$NITFILE" "$INPROGRESS"
+    NITFILE="$INPROGRESS"
 fi
 
 LOGFILE="${NITFILE%.md}-agent.log"

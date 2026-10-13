@@ -91,9 +91,10 @@ else
 fi
 
 echo
-echo "# Directory ($NITDIR)"
+done_count=$(ls "$NITDIR"/done-nit-*.md 2>/dev/null | wc -l | tr -d ' ')
+echo "# Directory ($NITDIR)  [${done_count} done-nit(s) hidden]"
 echo
-ls -lhA "$NITDIR"
+ls -lhA "$NITDIR" | grep -v 'done-nit-'
 
 # Offer clemency hearing for agents past 5 minutes (interactive only)
 if [[ -t 0 && ${#S_PIDS[@]} -gt 0 ]]; then

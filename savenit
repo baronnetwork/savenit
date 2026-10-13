@@ -134,4 +134,5 @@ LINE_COUNT=$(echo "$CAPTURED" | wc -l | tr -d ' ')
 if [[ -n "$CAPTURED" ]]; then
     echo "Validated pbcopy got your clipboard: ${LINE_COUNT} lines"
 fi
-echo "Saved your nit.  Fix it with fixnit."
+echo "Saved your nit: $OUTFILE"
+echo "Fix it now with: fixnit $(basename "$OUTFILE")"
