@@ -4,16 +4,21 @@ set -euo pipefail
 NITDIR="$HOME/claude-busywork"
 MODE="standard"
 NITFILE=""
+ALL_MODE=0
 
 # Optional explicit target: fixnit <nitfile> works that one file instead of
-# globbing the newest. Bare names resolve inside $NITDIR.
+# globbing the newest. Bare names resolve inside $NITDIR. "all" fan-outs
+# one agent per new-nit-* by re-invoking fixnit per file, so every spawn
+# still passes the selection, lock-gate, and claim-rename logic.
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -lite|--lite) MODE="lite" ;;
+        all) ALL_MODE=1 ;;
         -h|--help)
-            echo "Usage: fixnit [-lite] [nitfile]"
+            echo "Usage: fixnit [-lite] [nitfile | all]"
             echo "  no args   work the newest unassigned new-nit-*.md"
             echo "  nitfile   work that specific file (name or path)"
+            echo "  all       spawn an agent for every new-nit-*.md in the queue"
             exit 0
             ;;
         *)
@@ -26,6 +31,19 @@ while [[ $# -gt 0 ]]; do
     esac
     shift
 done
+
+if [[ "$ALL_MODE" -eq 1 ]]; then
+    count=0; skipped=0
+    while IFS= read -r f; do
+        if [[ "$MODE" == "lite" ]]; then
+            if "$0" --lite "$f"; then (( ++count )); else (( ++skipped )); fi
+        else
+            if "$0" "$f"; then (( ++count )); else (( ++skipped )); fi
+        fi
+    done < <(ls -r "$NITDIR"/new-nit-*.md 2>/dev/null)
+    echo "all: launched $count agent(s), skipped $skipped (locked or DONE)"
+    exit 0
+fi
 if [[ "$MODE" == "lite" ]]; then
     AGENT_DESC="Kimi-K3-lab-claude-compatible[1m] / effort high / --bare / via LiteLLM"
 else
