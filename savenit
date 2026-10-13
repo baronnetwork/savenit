@@ -1,25 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -eq 0 ]]; then
-    # Interactive prompt mode -- avoids shell parsing of parens/special chars
-    # when the user types: savenit (some thing in parens) without quotes
-    if [[ -t 0 ]]; then
-        printf 'What is annoying you? '
-        read -r -e COMPLAINT
-        if [[ -z "$COMPLAINT" ]]; then
-            echo "Usage: savenit \"what is annoying you\"" >&2
-            echo "  or:  savenit   (then type at the prompt)" >&2
-            exit 1
-        fi
-    else
-        echo "Usage: savenit \"what is annoying you\"" >&2
-        echo "  or:  savenit   (then type at the prompt)" >&2
+if [[ -t 0 ]]; then
+    # Always use interactive prompt on a terminal -- shell metacharacters
+    # (apostrophes, backticks, angle brackets, backslashes) in unquoted args
+    # are parsed by the shell before savenit runs, so the shell rejects them.
+    # Interactive read sidesteps this entirely.
+    printf 'What is annoying you? '
+    read -r -e COMPLAINT
+    if [[ -z "$COMPLAINT" ]]; then
+        echo "Usage: savenit   (type your complaint at the prompt)" >&2
         exit 1
     fi
 else
+    if [[ $# -eq 0 ]]; then
+        echo "Usage: savenit   (type your complaint at the prompt)" >&2
+        exit 1
+    fi
     COMPLAINT="$*"
 fi
+
 DATE=$(date '+%Y-%m-%d')
 TIME=$(date '+%H:%M')
 TIMESTAMP="${DATE}-$(date '+%H-%M')"
@@ -34,38 +34,49 @@ if [[ -t 0 ]]; then
         CAPTURED=$(pbpaste 2>/dev/null || true)
     fi
 else
-    # Non-interactive stdin: keep original copy-then-command behavior
     CAPTURED=$(pbpaste 2>/dev/null || true)
 fi
+
 OUTFILE="$HOME/claude-busywork/new-nit-${TIMESTAMP}.md"
 
-AGENT_INSTRUCTIONS="${COMPLAINT}"
+# Build AGENT_INSTRUCTIONS safely -- no heredoc expansion risk
 if [[ -n "$CAPTURED" ]]; then
     AGENT_INSTRUCTIONS="${COMPLAINT}
 
 Captured output for context:
 ${CAPTURED}"
+else
+    AGENT_INSTRUCTIONS="${COMPLAINT}"
 fi
 
-cat > "$OUTFILE" << TEMPLATE
+# Write the nit file using quoted heredocs (no variable expansion) for static
+# sections, and printf '%s\n' for user-supplied content. This handles any
+# special characters in the complaint: quotes, backticks, backslashes, angle
+# brackets, dollar signs, etc.
+{
+    cat << 'HDR'
 # NitFile - for fixing the pesky things while bored
 
 # Human complaint:
 
-${COMPLAINT}
-
-## Issue status: NEW
-
-## When it happened: ${DATE} at ${TIME} on ${HOST} (${OS_TYPE})
-
-## Where it happened (invoked from): ${PWD}
-
+HDR
+    printf '%s\n' "$COMPLAINT"
+    printf '\n'
+    printf '## Issue status: NEW\n'
+    printf '\n'
+    printf '## When it happened: %s at %s on %s (%s)\n' "$DATE" "$TIME" "$HOST" "$OS_TYPE"
+    printf '\n'
+    printf '## Where it happened (invoked from): %s\n' "$PWD"
+    printf '\n'
+    cat << 'SECTION2'
 ## When was it fixed:
 
 # Human prompt for the AI agent on what action to take:
 
-${AGENT_INSTRUCTIONS}
-
+SECTION2
+    printf '%s\n' "$AGENT_INSTRUCTIONS"
+    printf '\n'
+    cat << 'FOOTER'
 # AI agent question back to the human
 
 Maximum two questions, pick the most important 1 or 2 questions needed to unblock.  Small issues, I leave it to the AI to decide what is best.
@@ -124,13 +135,16 @@ update the nitFile with the # AI resolution summary
 ## After the issue is fully resolved and tested
 
 spawn a subagent to:
-1/ Rename filename-autoAgenticNitFix-proposed-changelog.md to filename-autoAgenticNitFix-changelog.md
-2/ Update the NitFile status field issueStatus to DONE
-3/ Update the Nitfile status field whenFixed to ${DATE} at ${TIME} by <model>
-4/ Rename the Nitfile from new-nit-${TIMESTAMP}.md to done-nit-${TIMESTAMP}.md
-TEMPLATE
+FOOTER
+    printf '1/ Rename filename-autoAgenticNitFix-proposed-changelog.md to filename-autoAgenticNitFix-changelog.md\n'
+    printf '2/ Update the NitFile status field issueStatus to DONE\n'
+    printf '3/ Update the Nitfile status field whenFixed to %s at %s by <model>\n' "$DATE" "$TIME"
+    printf '4/ Rename the Nitfile from new-nit-%s.md to done-nit-%s.md\n' "$TIMESTAMP" "$TIMESTAMP"
+    printf '\n'
+    printf '## fixnit audit stamp: mode=standard agent=claude-sonnet-4-6 / direct pid=%s started=%s %s\n' "$$" "$DATE" "$TIME"
+} > "$OUTFILE"
 
-LINE_COUNT=$(echo "$CAPTURED" | wc -l | tr -d ' ')
+LINE_COUNT=$(printf '%s\n' "$CAPTURED" | wc -l | tr -d ' ')
 if [[ -n "$CAPTURED" ]]; then
     echo "Validated pbcopy got your clipboard: ${LINE_COUNT} lines"
 fi
