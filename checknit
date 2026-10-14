@@ -26,7 +26,7 @@ etime_seconds() {
     # prefer ps etimes; derive from etime string if the platform lacks it
     local pid="$1" secs e d=0 h=0 m=0 s=0 a b c
     secs=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')
-    if [[ -n "$secs" ]]; then echo "$secs"; return; fi
+    if [[ "$secs" =~ ^[0-9]+$ ]]; then echo "$secs"; return; fi
     e=$(ps -o etime= -p "$pid" 2>/dev/null | tr -d ' ')
     [[ "$e" == *-* ]] && { d="${e%%-*}"; e="${e#*-}"; }
     IFS=: read -r a b c <<< "$e"
@@ -35,33 +35,100 @@ etime_seconds() {
     echo $(( 10#${d:-0}*86400 + 10#${h:-0}*3600 + 10#${m:-0}*60 + 10#${s:-0} ))
 }
 
-# Working: claude processes with a nit path in argv
+# Queue display: one line per nit, two aligned groups (in-flight, then waiting).
+# Detection is unchanged on purpose: in-flight comes from pgrep argv matching,
+# waiting from the new-nit glob. DISPLAY ONLY.
+TODAY=$(date +%F)
+COLS="${COLUMNS:-}"
+[[ "$COLS" =~ ^[0-9]+$ ]] || COLS=$(tput cols 2>/dev/null || echo 100)
+(( COLS < 60 )) && COLS=100
+
+fit() {
+    # fit <maxlen> <text>: truncate to maxlen chars, marking with ...
+    local n="$1" t="$2"
+    if (( ${#t} > n )); then printf '%s...' "${t:0:n-3}"
+    else printf '%s' "$t"; fi
+}
+
+short_stamp() {
+    # nit stamp YYYY-MM-DD-HH-MM[-SS] -> HH-MM[-SS] today, "YYYY-MM-DD HH-MM[-SS]" otherwise
+    local s="$1"
+    if [[ "${s:0:10}" == "$TODAY" ]]; then echo "${s:11}"
+    else echo "${s:0:10} ${s:11}"; fi
+}
+
+nit_stamp_file() {
+    local b
+    b=$(basename "$1"); b="${b%.md}"
+    b="${b#new-nit-}"; b="${b#inprogress-nit-}"; b="${b#done-nit-}"
+    echo "$b"
+}
+
+first_complaint() {
+    # first non-blank line after '# Human complaint:'
+    awk '/^# Human complaint:/{f=1;next} f&&NF{print;exit}' "$1" 2>/dev/null
+}
+
+nit_mode() {
+    # mode from the fixnit audit stamp; direct sonnet displays as standard
+    local m
+    m=$(sed -nE 's/^## fixnit audit stamp:.*mode=([^ ]+).*/\1/p' "$1" 2>/dev/null | head -1)
+    [[ "$m" == "sonnet" ]] && m="standard"
+    echo "$m"
+}
+
+needs_you() {
+    # true when the nit has a real question back to the human or is PENDINGHUMAN
+    local f="$1"
+    grep -qi 'Issue status: PENDINGHUMAN' "$f" 2>/dev/null && return 0
+    awk '
+        /^# AI agent question back to the human/ {inq=1; next}
+        inq && /^#/ {exit}
+        inq {
+            line=$0; gsub(/^[ \t]+|[ \t]+$/, "", line)
+            if (line == "") next
+            if (line ~ /^Maximum two questions/) next
+            if (line ~ /^\(In bullets/) next
+            if (tolower(line) ~ /^[-*] *none( needed)?\.?$/) next
+            found=1; exit
+        }
+        END {exit !found}' "$f"
+}
+
+queue_line() {
+    # queue_line <label> <stamp> <complaint> <tail>
+    local label="$1" stamp="$2" complaint="$3" tail="$4" head room
+    printf -v head '%-9s  %s  ' "$label" "$stamp"
+    room=$(( COLS - ${#head} - ${#tail} ))
+    (( room < 10 )) && room=10
+    printf '%s%s%s\n' "$head" "$(fit "$room" "${complaint:-<no complaint found>}")" "$tail"
+}
+
+# In-flight: claude processes with a nit path in argv
 # S_PIDS: agents past 5 minutes, offered for killing at the end
-declare -a W_LINES=()
+declare -a I_LINES=()
 declare -a W_NITS=()
 declare -a S_PIDS=()
 while IFS= read -r line; do
     pid="${line%% *}"
-    nit=$(grep -oE "$NITDIR/new-nit-[0-9-]+\.md" <<< "${line#* }" | head -1 || true)
+    nit=$(grep -oE "$NITDIR/(new-nit|inprogress-nit)-[0-9-]+\.md" <<< "${line#* }" | head -1 || true)
     [[ -z "$nit" ]] && continue
     etime=$(ps -o etime= -p "$pid" 2>/dev/null | tr -d ' ')
     esecs=$(etime_seconds "$pid")
     (( esecs > 300 )) && S_PIDS+=("$pid")
-    log="${nit%.md}-agent.log"
-    W_LINES+=("PID $pid  running $(etime_human "${etime:-00:00}")  $nit")
-    W_LINES+=("    log:   $log")
-    if (( esecs > 600 )); then
-        W_LINES+=("    STALE: over 10 min, last 5 log lines:")
-        while IFS= read -r tl; do
-            W_LINES+=("      | $tl")
-        done < <(tail -5 "$log" 2>/dev/null || true)
-    fi
-    W_LINES+=("")
+    stamp=$(short_stamp "$(nit_stamp_file "$nit")")
+    mode=$(nit_mode "$nit")
+    tail=" (PID ${pid}"
+    [[ -n "$mode" ]] && tail+=", mode ${mode}"
+    tail+=")"
+    (( esecs > 600 )) && tail+=" STALE $(etime_human "${etime:-00:00}")"
+    needs_you "$nit" && tail+=" ⚑"
+    I_LINES+=("$(queue_line in-flight "$stamp" "$(first_complaint "$nit")" "$tail")")
     W_NITS+=("$nit")
-done < <(pgrep -fl 'claude.*new-nit' 2>/dev/null || true)
+done < <(pgrep -fl 'claude.*(new|inprogress)-nit' 2>/dev/null || true)
 
-# Backlog: non-DONE nits nobody is working
-declare -a B_LINES=()
+# Waiting: non-DONE nits nobody is working
+declare -a WL_LINES=()
 while IFS= read -r f; do
     grep -q "Issue status: DONE" "$f" 2>/dev/null && continue
     skip=0
@@ -69,32 +136,89 @@ while IFS= read -r f; do
         [[ "$w" == "$f" ]] && { skip=1; break; }
     done
     (( skip )) && continue
-    base=$(basename "$f")
-    stamp=${base#new-nit-}; stamp=${stamp%.md}
-    B_LINES+=("${stamp:0:10} ${stamp:11:2}:${stamp:14:2}  $f")
+    tail=""; needs_you "$f" && tail=" ⚑"
+    WL_LINES+=("$(queue_line waiting "$(short_stamp "$(nit_stamp_file "$f")")" "$(first_complaint "$f")" "$tail")")
 done < <(ls -r "$NITDIR"/new-nit-*.md 2>/dev/null || true)
 
+# Cleanup quietly first: validate done-nit files and shelve them into done-nits/
+# (runs before printing so the directory listing reflects the post-shelve state)
+declare -a MOVED=()
+while IFS= read -r f; do
+    base=$(basename "$f")
+    # Accept both old HH-MM and current HH-MM-SS done-nit names
+    [[ "$base" =~ ^done-nit-[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{2}-[0-9]{2}(-[0-9]+){0,2}\.md$ ]] || continue
+    if ! grep -q "Issue status: DONE" "$f" 2>/dev/null; then
+        echo "  WARNING: $base lacks DONE status, skipping"
+        continue
+    fi
+    stamp="${base#done-nit-}"; stamp="${stamp%.md}"
+    mkdir -p "$NITDIR/done-nits"
+    mv "$f" "$NITDIR/done-nits/"
+    MOVED+=("$base")
+    for prefix in inprogress-nit new-nit; do
+        log="$NITDIR/${prefix}-${stamp}-agent.log"
+        [[ -f "$log" ]] && mv "$log" "$NITDIR/done-nits/" && MOVED+=("$(basename "$log")")
+    done
+    cl="$NITDIR/done-nit-${stamp}-autoAgenticNitFix-changelog.md"
+    [[ -f "$cl" ]] && mv "$cl" "$NITDIR/done-nits/" && MOVED+=("$(basename "$cl")")
+done < <(ls "$NITDIR"/done-nit-*.md 2>/dev/null || true)
+
+done_count=$(ls "$NITDIR/done-nits"/done-nit-*.md 2>/dev/null | wc -l | tr -d ' ')
+
+# 1) Directory listing first
 echo
-echo "# Working (${#W_NITS[@]})"
+echo "# Directory ($NITDIR)  [${done_count} done-nit(s) in done-nits/]"
 echo
-for l in ${W_LINES[@]+"${W_LINES[@]}"}; do echo "$l"; done
-echo "# Backlog (${#B_LINES[@]})"
-echo
-for l in ${B_LINES[@]+"${B_LINES[@]}"}; do echo "$l"; done
+ls -lhA "$NITDIR" | grep -v 'done-nit-' | awk 'NF>=9{print $5,$6,$7,$8,$9}'
 echo
 
-if (( ${#W_NITS[@]} > 0 || ${#B_LINES[@]} > 0 )); then
+# 2) THEN the Cleanup line
+if (( ${#MOVED[@]} > 0 )); then
+    echo "Cleanup: shelved ${#MOVED[@]} file(s) -> $NITDIR/done-nits/"
+    echo
+fi
+
+# 3) Then the summary: queue state, action hints, recent fixes
+echo "# Queue (${#I_LINES[@]} in-flight, ${#WL_LINES[@]} waiting)   ⚑ = needs you"
+for l in ${I_LINES[@]+"${I_LINES[@]}"}; do echo "$l"; done
+for l in ${WL_LINES[@]+"${WL_LINES[@]}"}; do echo "$l"; done
+echo
+
+if (( ${#W_NITS[@]} > 0 || ${#WL_LINES[@]} > 0 )); then
     echo "Interrupt an agent:  kill <PID>"
     echo "Work the next nit:   fixnit"
 else
     echo "Nothing pending. Either you're out of complaints or you've gone numb."
 fi
+echo
 
-echo
-done_count=$(ls "$NITDIR"/done-nit-*.md 2>/dev/null | wc -l | tr -d ' ')
-echo "# Directory ($NITDIR)  [${done_count} done-nit(s) hidden]"
-echo
-ls -lhA "$NITDIR" | grep -v 'done-nit-'
+# Recent fixes: the 3 newest done-nits, first resolution-summary bullet each
+declare -a R_STAMPS=()
+declare -a R_BULLETS=()
+while IFS= read -r base; do
+    f="$NITDIR/$base"
+    [[ -f "$f" ]] || f="$NITDIR/done-nits/$base"
+    [[ -f "$f" ]] || continue
+    stamp="${base#done-nit-}"; stamp="${stamp%.md}"
+    bullet=$(awk '
+        /^# AI resolution summary/ {inr=1; next}
+        inr && /^#/ {exit}
+        inr && NF && $0 !~ /^\(In bullets/ {print; exit}' "$f" 2>/dev/null | sed -E 's/^[-*]+[[:space:]]*//')
+    [[ -z "$bullet" ]] && continue
+    R_STAMPS+=("$(short_stamp "$stamp")")
+    R_BULLETS+=("$bullet")
+done < <({ for d in "$NITDIR" "$NITDIR/done-nits"; do
+        for x in "$d"/done-nit-*.md; do [[ -e "$x" ]] && basename "$x"; done
+    done; } | sort -r | head -3)
+
+if (( ${#R_STAMPS[@]} > 0 )); then
+    echo "# Recent fixes"
+    for i in "${!R_STAMPS[@]}"; do
+        st="${R_STAMPS[$i]}"
+        printf '%s  %s\n' "$st" "$(fit $(( COLS - ${#st} - 2 )) "${R_BULLETS[$i]}")"
+    done
+    echo
+fi
 
 # Offer clemency hearing for agents past 5 minutes (interactive only)
 if [[ -t 0 && ${#S_PIDS[@]} -gt 0 ]]; then

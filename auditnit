@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# auditnit -- "wintermute" batch auditor for the nit pipeline. On demand (and
+# hookable to launchd later), fires ONE lite-mode agent over the K most recent
+# done-nits (default 10). For each, the agent reads the nit's complaint, its
+# changelog, and -- if repo files were touched -- the git diff covering them,
+# then runs whatever cheap structural check applies (bash -n for shell
+# scripts, nothing fancier; per-fix unit testing is explicitly NOT the goal).
+#
+# Verdicts are written as nits, and only as nits -- the busywork directory is
+# the only state (no registries, no TSVs, no state files):
+#   * NEW nits whose complaint starts 'REGRESSION from done-nit-<stamp>:' so
+#     the convoy picks them up
+#   * PENDINGHUMAN nits with a question when judgment is needed
+#   * nothing at all when nothing is broken (silent is good)
+#
+# Raison d'etre: the 16-39 nit fixed metacharacter parsing by always prompting
+# on tty, silently breaking the args path for hours; per-fix QA did not catch
+# it. Batch audit of behavior deltas is the intended catch mechanism.
+#
+# Usage: auditnit [-sonnet] [-n K] [--dry-run]
+#   -n K       audit the K most recent done-nits (default 10)
+#   -sonnet    use direct claude-sonnet instead of LiteLLM
+#   --dry-run  print the selected done-nits, launch nothing
+# Test hooks (env): NITDIR, LITE, CLAUDE_BIN
+
+NITDIR="${NITDIR:-$HOME/claude-busywork}"
+K=10
+MODE="lite"
+DRY=0
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -n)               K="${2:?auditnit: -n needs a count}"; shift 2 ;;
+        -sonnet|--sonnet) MODE="sonnet"; shift ;;
+        -lite|--lite)     MODE="lite"; shift ;;
+        --dry-run)        DRY=1; shift ;;
+        -h|--help)        sed -n '4,26p' "$0"; exit 0 ;;
+        *)                echo "auditnit: unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
+if ! [[ "$K" =~ ^[0-9]+$ ]] || [[ "$K" -lt 1 ]]; then
+    echo "auditnit: bad count: $K" >&2
+    exit 2
+fi
+[[ -d "$NITDIR" ]] || { echo "auditnit: no nit directory at $NITDIR" >&2; exit 1; }
+
+# K most recent done-nits across the root queue and the shelved done-nits/
+# pool, newest-first by filename. The strict name match excludes
+# done-nit-*-changelog.md and similar satellites from the glob.
+DONENITS=$(
+    for d in "$NITDIR" "$NITDIR/done-nits"; do
+        for f in "$d"/done-nit-*.md; do
+            [[ -e "$f" ]] || continue
+            b=$(basename "$f")
+            [[ "$b" =~ ^done-nit-[0-9][0-9-]*\.md$ ]] || continue
+            printf '%s\t%s\n' "$b" "$f"
+        done
+    done | sort -r | head -"$K" | cut -f2-
+)
+
+if [[ -z "$DONENITS" ]]; then
+    echo "auditnit: no done-nits to audit."
+    exit 0
+fi
+
+COUNT=$(printf '%s\n' "$DONENITS" | wc -l | tr -d ' ')
+echo "auditnit: selected $COUNT done-nit(s) (K=$K, mode=$MODE):"
+printf '%s\n' "$DONENITS" | sed 's/^/  /'
+
+[[ "$DRY" -eq 1 ]] && exit 0
+
+# One audit at a time: a running audit agent carries this phrase in its argv
+if pgrep -f 'WINTERMUTE batch audit' >/dev/null 2>&1; then
+    echo "auditnit: an audit agent is already running; refusing to double up." >&2
+    exit 1
+fi
+
+# Lite preflight (same gate fixnit runs): a dead CLI or expired token must
+# fail loudly here, not silently in a detached agent.
+LITE="${LITE:-lite}"
+CLAUDE_BIN="${CLAUDE_BIN:-claude}"
+if [[ "$MODE" != "sonnet" ]]; then
+    if ! command -v "$LITE" >/dev/null 2>&1; then
+        echo "auditnit: missing 'lite' CLI. Install: pipx install 'litellm[proxy]', then: lite login" >&2
+        exit 1
+    fi
+    if "$LITE" auth print-token 2>&1 | grep -qiE 'expired|not logged|run.*login|login.*again|no.*token|unauthorized'; then
+        echo "auditnit: LiteLLM token expired. Run: lite login" >&2
+        exit 1
+    fi
+fi
+
+STAMP=$(date '+%Y-%m-%d-%H-%M-%S')
+LOGFILE="$NITDIR/audit-$STAMP-agent.log"
+
+PROMPT="WINTERMUTE batch audit $STAMP: you are the batch regression auditor for the nit pipeline. Audit the $COUNT most recent completed fixes for regressions.
+
+The done-nits to audit are:
+$DONENITS
+
+For EACH done-nit above (call its stamp STAMP):
+1. Read the nit file: the complaint, the AI resolution summary, and the list of edited files.
+2. Read its changelog if present: done-nit-STAMP-autoAgenticNitFix-changelog.md next to the nit or in $NITDIR, plus any repo-local <file>-autoAgenticNitFix-changelog.md for touched files.
+3. Identify the repo files the fix touched, from the edited-files list, the changelog, and the nit's '## Where it happened' directory. If no repo files were touched, skip this nit.
+4. In that repo, read the git diff covering the touched files around the fix window (e.g. git -C <repo> log -p --since=<nit date> -- <files>, or git -C <repo> log -p -3 -- <files>). Also read the CURRENT content of each touched file.
+5. Run ONLY cheap structural checks on touched files: bash -n for anything with a sh/bash shebang or .sh extension. Nothing fancier -- per-fix unit testing is explicitly NOT the goal.
+6. Check the behavior delta: does the current code plus diff still deliver what the complaint and resolution summary promised? (This audit exists because a metacharacter fix that switched to always prompting on tty silently broke the args path for hours and per-fix QA missed it. Look for that class of break: one entry path fixed, another silently killed.)
+
+Verdicts -- the busywork directory is the ONLY state. No registries, no TSVs, no marker files, no report files:
+- Before writing any verdict, check whether any nit anywhere under $NITDIR (including $NITDIR/done-nits/) already mentions 'REGRESSION from done-nit-STAMP'. Never file a duplicate.
+- For each real finding: write a new nit file at $NITDIR/new-nit-<current-stamp>.md (suffix -2, -3 etc. if that name exists) in the standard NitFile format (mimic an existing done-nit or $NITDIR/new-nit-template.txt), with the complaint line starting 'REGRESSION from done-nit-STAMP: ', '## Issue status: NEW', '## Where it happened (invoked from):' set to the affected repo, absolute paths to affected files in the complaint, and the evidence (which check failed, claim vs actual). The convoy will pick it up.
+- If a finding needs human judgment rather than a mechanical fix, write the same nit but with '## Issue status: PENDINGHUMAN' and your question under '# AI agent question back to the human'.
+- If nothing is broken, write NOTHING. Silence is success.
+
+Do not edit any repo files and do not fix anything yourself. Findings become nits; that is all."
+
+# Scrub inherited gateway vars before spawning (see fixnit): a stale
+# ANTHROPIC_AUTH_TOKEN/BASE_URL 403s a fresh launch.
+GATEWAY_SCRUB=(env -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_BASE_URL)
+
+cd "$NITDIR"
+
+if [[ "$MODE" == "sonnet" ]]; then
+    "${GATEWAY_SCRUB[@]}" \
+        "$CLAUDE_BIN" --model claude-sonnet-4-6 --dangerously-skip-permissions \
+        -p "$PROMPT" \
+        >> "$LOGFILE" 2>&1 &
+else
+    "${GATEWAY_SCRUB[@]}" \
+        "$LITE" claude --bare --dangerously-skip-permissions \
+        --model "Kimi-K3-lab-claude-compatible[1m]" --effort high \
+        --settings '{"model":"Kimi-K3-lab-claude-compatible[1m]"}' \
+        -p "$PROMPT" \
+        >> "$LOGFILE" 2>&1 &
+fi
+AUDIT_PID=$!
+
+# Instant-death guard (same trick as fixnit): a dead-but-unreaped child still
+# satisfies kill -0, so an empty ps row or a zombie state means instant exit
+sleep 5
+STATE=$(ps -o stat= -p "$AUDIT_PID" 2>/dev/null || true)
+if [[ -z "$STATE" || "$STATE" == Z* ]]; then
+    echo "auditnit: agent exited within 5s of launch. Last log lines from $LOGFILE:" >&2
+    tail -n 15 "$LOGFILE" >&2 2>/dev/null || true
+    exit 1
+fi
+
+echo "auditnit: agent pid $AUDIT_PID alive; log: $LOGFILE"
+echo "auditnit: broken findings (if any) land as nits in $NITDIR -- silent means clean"

@@ -18,36 +18,56 @@ flowchart LR
 
 | What | Path |
 |---|---|
-| savenit script | `~/bin/savenit` |
-| fixnit script | `~/bin/fixnit` |
-| checknit script | `~/bin/checknit` |
+| Scripts (all three) | In the repo checkout, e.g. `~/consulting/savenit/savenit` (also `fixnit`, `checknit`) |
 | Nit template (reference) | `~/claude-busywork/new-nit-template.txt` |
 | Nit working directory | `~/claude-busywork/` |
-| New nits | `~/claude-busywork/new-nit-YYYY-MM-DD-HH-MM.md` |
-| Finished nits | `~/claude-busywork/done-nit-YYYY-MM-DD-HH-MM.md` |
-| Agent logs | `~/claude-busywork/new-nit-YYYY-MM-DD-HH-MM-agent.log` |
+| New nits | `~/claude-busywork/new-nit-YYYY-MM-DD-HH-MM-SS.md` (collision suffix `-N` if the same second matches) |
+| In-progress nits | `~/claude-busywork/inprogress-nit-YYYY-MM-DD-HH-MM-SS.md` |
+| Finished nits | `~/claude-busywork/done-nit-YYYY-MM-DD-HH-MM-SS.md` (checknit shelves these into `done-nits/`) |
+| Agent logs | `~/claude-busywork/inprogress-nit-<timestamp>-agent.log`, renamed `done-nit-...` on completion |
 
 ## Prerequisites
 
 1. macOS (uses `pbpaste` and `sw_vers`).
 2. The `claude` CLI installed and authenticated.
-3. `~/bin` on your `$PATH`. Check with `echo $PATH | tr ':' '\n' | grep "$HOME/bin"`.
-   If missing, add `export PATH="$HOME/bin:$PATH"` to `~/.zshrc` and `~/.bashrc`.
+3. The repo checkout on your `$PATH`, exported where each shell family actually
+   looks. Check with `echo $PATH | tr ':' '\n' | grep savenit`.
+
+   **zsh: `~/.zshenv` is the canonical file.** It is sourced by every zsh:
+   interactive shells, `zsh -c` scripts, cron jobs, agent subprocesses. Do NOT
+   also add the export to `~/.zshrc` or `~/.zprofile` — interactive shells
+   inherit from `.zshenv` anyway, and duplicate PATH exports are drift seeds
+   (this is where every "works in my terminal but not in scripts" bug is born).
+
+   **bash: `~/.bashrc`, chained from the login file.** macOS Terminal opens login
+   shells that read `~/.bash_profile` (or `~/.profile`) and skip `.bashrc`
+   entirely, so put the export in `.bashrc` and one `source ~/.bashrc` line in
+   the login file.
+
+   **GUI apps are a separate universe.** Apps launched from Dock/Spotlight (e.g.
+   Claude desktop) read no rc files; their environment comes from launchd. Only
+   `launchctl setenv PATH ...` reaches them, and it dies at logout, so treat it
+   as optional.
+
+   Idempotent export line for both shells:
+
+   ```bash
+   if [[ ":$PATH:" != *":$HOME/consulting/savenit:"* ]]; then export PATH="$HOME/consulting/savenit:$PATH"; fi
+   ```
 
 ## Install
 
 ```bash
-mkdir -p ~/bin ~/claude-busywork
+git clone git@github.com:baronnetwork/savenit.git ~/consulting/savenit
+mkdir -p ~/claude-busywork
 ```
 
-Create the four files below (contents in the next sections), then:
+The scripts ARE the repo files; PATH points at the checkout directly, so there
+are no symlinks or copies to keep in sync. The full script snapshots inline in
+sections 1/2/4 below are historical reference — the repo files are authoritative.
 
-```bash
-chmod +x ~/bin/savenit ~/bin/fixnit ~/bin/checknit
-```
-
-No rc-file edits needed beyond the `$PATH` entry. Scripts on `$PATH` work
-everywhere: interactive shells, scripts, subshells.
+With the `$PATH` entry from the Prerequisites, the scripts work everywhere:
+interactive shells, scripts, subshells, agent subprocesses.
 
 ## 1. ~/bin/savenit
 
@@ -497,28 +517,27 @@ fi
 ```bash
 # 1. Copy the offending output first (Cmd+C), then:
 savenit "zshrc alias is not loading on new terminals"
-# 2. Prompt appears; press n to skip the clipboard, anything else (or Enter) to include it
 
-# Instruction-only nit, just press n at the prompt:
-savenit "add a cust alias for customer-projects"
+# Instruction-only nit, clipboard skipped:
+savenit -n "add a cust alias for customer-projects"
+
+# Bare invocation asks once for the complaint (the metachar-safe path):
+savenit
 ```
 
-Output, exactly two lines after the prompt (validation line omitted if the clipboard
-was skipped or empty):
-
-```text
-Grab clipboard? [Y/n] y
-Validated pbcopy got your clipboard: 42 lines
-Saved your nit.  Fix it with fixnit.
-```
+Zero prompts when args are given. The clipboard is grabbed automatically via
+`pbpaste` unless `-n` / `--no-clip` skips it. Output is at most one line —
+`Validated pbcopy got your clipboard: N lines`, only when the clipboard had
+content. Fire-and-forget by design: save the nit, move on.
 
 Behavior notes:
 
-- The prompt `Grab clipboard? [Y/n]` runs on every interactive invocation. `n`
-   means instruction-only; `y`, any other key, or plain Enter means include the
-   clipboard. The human is the signal, no guessing involved.
-- When stdin is not a terminal (scripts, pipes), the prompt is skipped and the
-   clipboard is included, preserving the original copy-then-command behavior.
+- Filenames carry seconds (`new-nit-YYYY-MM-DD-HH-MM-SS.md`) plus a `-N`
+   collision suffix when two saves land in the same second, so a new nit never
+   silently overwrites an older one.
+- The bare-interactive prompt exists because unquoted complaints with shell
+   metacharacters (', `, <, >, \) never survive the shell long enough to become
+   arguments; typing at a prompt sidesteps that entire failure class.
 - The file is never opened. Save the nit, move on, let the agent earn its keep.
 - Issue status starts as `NEW`; "When was it fixed" stays blank for the agent.
 - Clipboard content lands in the agent-instructions block as captured context, so
@@ -538,8 +557,10 @@ fixnit      # run again for the next one
 Output:
 
 ```text
-Nit:   /Users/you/claude-busywork/new-nit-2026-10-13-14-47.md
-Log:   /Users/you/claude-busywork/new-nit-2026-10-13-14-47-agent.log
+Mode:  standard
+Nit:   /Users/you/claude-busywork/inprogress-nit-2026-10-13-14-47-12.md
+Log:   /Users/you/claude-busywork/inprogress-nit-2026-10-13-14-47-12-agent.log
+From:  /Users/you/some-project
 Agent: starting...
 PID:   84231
 ```
@@ -621,6 +642,7 @@ deliberately rejected for this reason; revisit once the workflow earns trust.
 ## Uninstall
 
 ```bash
-rm ~/bin/savenit ~/bin/fixnit ~/bin/checknit
+rm -rf ~/consulting/savenit          # the repo checkout holds all three scripts
+# remove the PATH export from ~/.zshenv and ~/.bashrc
 # keep or delete ~/claude-busywork as you see fit
 ```

@@ -1,0 +1,279 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# convoynit -- "convoy" queue orchestrator for the nit pipeline: the automated
+# dispatcher. Loops the queue and fires fixnit at eligible nits instead of a
+# human typing fixnit between agents.
+#
+# Eligibility (per sweep, newest-first):
+#   - never fires a nit whose status is DONE, QA, or PENDINGHUMAN
+#   - target files do not overlap any in-flight nit's targets (in-flight =
+#     convoy-fired agents it tracks + any live agent pgrep finds)
+#   - not behind a still-pending newer nit touching the same files (order rule)
+# Targets are parsed from each nit's complaint/prompt: 'Target repo file:'
+# hints and any absolute paths. Nits with no parseable targets overlap nothing.
+# Orphaned inprogress-nit-*.md with no live agent are adopted on the same
+# terms (the pick from done-nit-2026-10-13-17-10-01). Stops when the queue is
+# empty and nothing is in flight. Sequential sweep is the floor; nits with
+# disjoint targets run in parallel.
+#
+# Usage: convoynit [-lite|-sonnet]   (mode flags pass through to fixnit)
+#        convoynit --help
+# Test hooks (env): NITDIR, FIXNIT, CONVOY_POLL (seconds between idle polls)
+
+NITDIR="${NITDIR:-$HOME/claude-busywork}"
+FIXNIT="${FIXNIT:-/Users/hbaron/consulting/savenit/fixnit}"
+POLL="${CONVOY_POLL:-5}"
+
+MODE_ARGS=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help)
+            sed -n '4,22p' "$0"
+            exit 0
+            ;;
+        *)
+            MODE_ARGS+=("$1")
+            ;;
+    esac
+    shift
+done
+
+[[ -d "$NITDIR" ]] || { echo "convoynit: no nit directory at $NITDIR" >&2; exit 1; }
+[[ -x "$FIXNIT" ]] || { echo "convoynit: fixnit not executable at $FIXNIT" >&2; exit 1; }
+
+# One convoy at a time (pgrep -f sees our own argv; exclude self)
+ME=$$
+OTHERS=$(pgrep -f convoynit 2>/dev/null | grep -vx "$ME" || true)
+if [[ -n "$OTHERS" ]]; then
+    echo "convoynit: another convoy is already running (pid: $OTHERS). One dispatcher is enough." >&2
+    exit 1
+fi
+
+stamp_of() {
+    # nit file path -> bare stamp (works for new-/inprogress-/done-). Always
+    # newline-terminated: command substitution strips it, piped readers need it
+    local b
+    b=$(basename "$1"); b="${b%.md}"
+    b="${b#new-nit-}"; b="${b#inprogress-nit-}"; b="${b#done-nit-}"
+    printf '%s\n' "$b"
+}
+
+nit_path_for_stamp() {
+    local s="$1" p f
+    for p in new inprogress "done"; do
+        f="$NITDIR/$p-nit-$s.md"
+        if [[ -f "$f" ]]; then printf '%s' "$f"; return 0; fi
+    done
+    return 1
+}
+
+nit_targets() {
+    # Parse the complaint + prompt region (between '# Human complaint:' and
+    # '# AI agent question back to the human', excluding '#' metadata lines so
+    # '## Where it happened' does not make every nit share a "target") for
+    # absolute paths and 'Target repo file:' hints. Relative hints resolve
+    # against the complaint's workdir. Output: sorted unique paths, one/line.
+    local f="$1" wd body
+    wd=$(grep -m1 '^## Where it happened' "$f" 2>/dev/null | sed 's/.*: *//' || true)
+    body=$(awk '
+        /^# Human complaint:/ {grab=1; next}
+        /^# AI agent question back to the human/ {grab=0}
+        grab && $0 !~ /^#/ {print}
+    ' "$f")
+    {
+        printf '%s\n' "$body" | grep -oE '/[A-Za-z0-9._~+@%=-][A-Za-z0-9._~+@%=/-]*' || true
+        printf '%s\n' "$body" | grep 'Target repo file:' \
+            | sed -E 's/.*Target repo file:[[:space:]]*//' | tr ' ' '\n' || true
+    } | sed -E 's/[.,;:)"`\]'"'"']+$//; s/^\(+//' \
+      | sed "s|^~|$HOME|" \
+      | awk -v wd="$wd" 'NF { if ($0 ~ /^\//) print; else if (wd != "") print wd "/" $0 }' \
+      | sort -u
+}
+
+overlaps() {
+    # true iff the two space-separated path lists share an element
+    local a b
+    for a in $1; do
+        for b in $2; do
+            [[ "$a" == "$b" ]] && return 0
+        done
+    done
+    return 1
+}
+
+# State (bash 3.2: no assoc arrays -- delimited strings instead)
+# FIRED_LIST:    lines of "<stamp> <pid>"   agents this convoy launched
+# TRYFAIL_LIST:  lines of "<stamp> <n>"     fixnit refused/failed at completion-count n
+# TCACHE:        lines of "<stamp>\t<space-separated targets>"
+FIRED_LIST=""
+TRYFAIL_LIST=""
+TCACHE=""
+COMPLETIONS=0
+
+is_fired()    { printf '%s' "$FIRED_LIST"    | grep -q "^$1 " 2>/dev/null; }
+fired_pid()   { printf '%s' "$FIRED_LIST"    | awk -v s="$1" '$1==s{print $2}'; }
+is_tryfail()  { printf '%s' "$TRYFAIL_LIST"  | grep -q "^$1 " 2>/dev/null; }
+tryfail_at()  { printf '%s' "$TRYFAIL_LIST"  | awk -v s="$1" '$1==s{print $2}'; }
+
+record_fire()    { FIRED_LIST+="$1 $2"$'\n'; }
+record_tryfail() { TRYFAIL_LIST+="$1 $2"$'\n'; }
+drop_fired()     { FIRED_LIST=$(printf '%s' "$FIRED_LIST" | grep -v "^$1 " || true); }
+
+cached_targets() {
+    # rename-proof: keyed by stamp, survives the new->inprogress claim-rename
+    local s="$1" hit f t
+    hit=$(printf '%s' "$TCACHE" | awk -F'\t' -v s="$s" '$1==s{print $2}')
+    if [[ -n "$hit" ]]; then printf '%s' "$hit"; return 0; fi
+    f=$(nit_path_for_stamp "$s") || return 1
+    t=$(nit_targets "$f" | tr '\n' ' ')
+    TCACHE+="$s"$'\t'"$t"$'\n'
+    printf '%s' "$t"
+}
+
+external_inflight_stamps() {
+    # nits with a live agent this convoy did not launch (same detection fixnit
+    # and checknit use: the agent's argv carries the nit path inside -p prompt)
+    pgrep -fl 'claude.*(new|inprogress)-nit' 2>/dev/null \
+        | grep -oE "$NITDIR/(new-nit|inprogress-nit)-[0-9-]+\.md" \
+        | while IFS= read -r f; do stamp_of "$f"; done \
+        | sort -u || true
+}
+
+inflight_target_union() {
+    # targets of: live convoy-fired agents + live external agents
+    local out="" s t p
+    if [[ -n "$FIRED_LIST" ]]; then
+        while IFS=' ' read -r s p; do
+            [[ -z "$s" ]] && continue
+            kill -0 "$p" 2>/dev/null || continue
+            t=$(cached_targets "$s" 2>/dev/null || true)
+            out+="$t "
+        done <<< "$FIRED_LIST"
+    fi
+    while IFS= read -r s; do
+        [[ -z "$s" ]] && continue
+        is_fired "$s" && continue
+        t=$(cached_targets "$s" 2>/dev/null || true)
+        out+="$t "
+    done < <(external_inflight_stamps)
+    printf '%s' "$out"
+}
+
+candidates() {
+    # newest-first stamps of fireable nits: new-nit-* queue, then orphaned
+    # inprogress-nit-* (no live agent; the adoption pick from 17-10-01).
+    # DONE/QA/PENDINGHUMAN never listed. Convoy-fired and externally-owned
+    # stamps are filtered by the sweep itself.
+    local f
+    while IFS= read -r f; do
+        grep -qiE "Issue status: (DONE|QA|PENDINGHUMAN)" "$f" 2>/dev/null && continue
+        stamp_of "$f"
+    done < <(ls -r "$NITDIR"/new-nit-*.md 2>/dev/null || true)
+    while IFS= read -r f; do
+        grep -qiE "Issue status: (DONE|QA|PENDINGHUMAN)" "$f" 2>/dev/null && continue
+        stamp_of "$f"
+    done < <(ls -r "$NITDIR"/inprogress-nit-*.md 2>/dev/null || true)
+}
+
+fire() {
+    local s="$1" f out pid tmp
+    f=$(nit_path_for_stamp "$s") || { record_tryfail "$s" "$COMPLETIONS"; return 1; }
+    echo "convoy: firing $s"
+    # Route fixnit's output through a temp file, not a captured pipe: any
+    # background process fixnit spawns inherits stdout, and a pipe capture
+    # would block until THAT exits too (silently serializing the convoy)
+    tmp=$(mktemp "${TMPDIR:-/tmp}/convoynit.XXXXXX") || { record_tryfail "$s" "$COMPLETIONS"; return 1; }
+    if ! "$FIXNIT" ${MODE_ARGS[@]+"${MODE_ARGS[@]}"} "$f" > "$tmp" 2>&1; then
+        echo "convoy: fixnit refused/failed for $s:" >&2
+        sed 's/^/  /' "$tmp" >&2
+        rm -f "$tmp"
+        record_tryfail "$s" "$COMPLETIONS"
+        return 1
+    fi
+    pid=$(grep -oE 'PID: +[0-9]+' "$tmp" | grep -oE '[0-9]+' | head -1 || true)
+    rm -f "$tmp"
+    if [[ -z "$pid" ]]; then
+        echo "convoy: could not read agent PID for $s from fixnit output" >&2
+        record_tryfail "$s" "$COMPLETIONS"
+        return 1
+    fi
+    record_fire "$s" "$pid"
+    echo "convoy: $s -> agent pid $pid"
+}
+
+sweep() {
+    # one pass over the queue, newest-first; fires every currently-eligible
+    # nit. Returns 0 if at least one nit was fired.
+    local fired=0 s t ext blocked pending_targets=""
+    ext=$(external_inflight_stamps)
+    blocked=$(inflight_target_union)
+    while IFS= read -r s; do
+        [[ -z "$s" ]] && continue
+        is_fired "$s" && continue
+        printf '%s\n' "$ext" | grep -qxF "$s" && continue   # live external agent owns it
+        if is_tryfail "$s" && [[ "$(tryfail_at "$s")" -ge "$COMPLETIONS" ]]; then
+            # failed to launch and nothing has completed since; retry only
+            # after a tracked agent exits (its locks/state may have cleared)
+            pending_targets+="$(cached_targets "$s" 2>/dev/null || true) "
+            continue
+        fi
+        t=$(cached_targets "$s" 2>/dev/null || true)
+        if overlaps "$t" "$blocked"; then
+            echo "convoy: $s blocked, overlaps an in-flight nit's targets"
+            pending_targets+="$t "
+            continue
+        fi
+        if overlaps "$t" "$pending_targets"; then
+            echo "convoy: $s held, behind a newer same-file nit"
+            pending_targets+="$t "
+            continue
+        fi
+        if fire "$s"; then
+            fired=1
+            blocked+="$t "
+        fi
+        pending_targets+="$t "
+    done < <(candidates)
+    [[ "$fired" -eq 1 ]]
+}
+
+echo "convoy: watching $NITDIR (poll ${POLL}s; $(ls "$NITDIR"/new-nit-*.md 2>/dev/null | wc -l | tr -d ' ') nit(s) queued at start)"
+
+while :; do
+    # Reap finished convoy-fired agents
+    if [[ -n "$FIRED_LIST" ]]; then
+        while IFS=' ' read -r s p; do
+            [[ -z "$s" ]] && continue
+            if ! kill -0 "$p" 2>/dev/null; then
+                echo "convoy: agent for $s (pid $p) exited"
+                drop_fired "$s"
+                (( ++COMPLETIONS ))
+            fi
+        done <<< "$FIRED_LIST"
+    fi
+
+    if sweep; then
+        continue    # fired something; re-sweep immediately for disjoint followers
+    fi
+
+    # Nothing fired this sweep. Anybody still running?
+    if [[ -z "$FIRED_LIST" && -z "$(external_inflight_stamps)" ]]; then
+        REMAINING=""
+        while IFS= read -r s; do
+            [[ -z "$s" ]] && continue
+            is_fired "$s" && continue
+            REMAINING+="$s"$'\n'
+        done < <(candidates)
+        if [[ -z "$REMAINING" ]]; then
+            echo "convoy: queue empty, nothing in flight. Done ($COMPLETIONS agent(s) seen through)."
+            exit 0
+        fi
+        echo "convoy: stalled; remaining nits are blocked or failed to launch:" >&2
+        printf '%s' "$REMAINING" | sed 's/^/  /' >&2
+        echo "convoy: clear the blocker (bad launch, stale locks), then rerun me." >&2
+        exit 1
+    fi
+
+    sleep "$POLL"
+done

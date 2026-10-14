@@ -1,43 +1,55 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ -t 0 ]]; then
-    # Always use interactive prompt on a terminal -- shell metacharacters
-    # (apostrophes, backticks, angle brackets, backslashes) in unquoted args
-    # are parsed by the shell before savenit runs, so the shell rejects them.
-    # Interactive read sidesteps this entirely.
+# Zero-friction by design: args are the complaint, the clipboard is grabbed
+# automatically, and nothing ever prompts when args are present. -n skips the
+# clipboard grab for the rare stale-clipboard case. Bare interactive runs get
+# a complaint prompt only, since unquoted metacharacters (', `, <, >, \) never
+# survive the shell long enough to become args anyway.
+NOCLIP=0
+if [[ "${1:-}" == "-n" || "${1:-}" == "--no-clip" ]]; then
+    NOCLIP=1
+    shift
+fi
+
+if [[ $# -gt 0 ]]; then
+    COMPLAINT="$*"
+elif [[ -t 0 ]]; then
     printf 'What is annoying you? '
     read -r -e COMPLAINT
     if [[ -z "$COMPLAINT" ]]; then
-        echo "Usage: savenit   (type your complaint at the prompt)" >&2
+        echo "Usage: savenit [-n]   (type your complaint at the prompt; -n skips clipboard)" >&2
         exit 1
     fi
 else
-    if [[ $# -eq 0 ]]; then
-        echo "Usage: savenit   (type your complaint at the prompt)" >&2
-        exit 1
-    fi
-    COMPLAINT="$*"
+    echo "Usage: savenit [-n]   (type your complaint at the prompt; -n skips clipboard)" >&2
+    exit 1
 fi
 
 DATE=$(date '+%Y-%m-%d')
 TIME=$(date '+%H:%M')
-TIMESTAMP="${DATE}-$(date '+%H-%M')"
+# Seconds in the filename timestamp: two nits saved in the same minute would
+# collide on OUTFILE and silently overwrite. Lexical sort still equals date sort.
+TIMESTAMP="${DATE}-$(date '+%H-%M-%S')"
 HOST=$(hostname)
 OS_TYPE=$(sw_vers -productVersion 2>/dev/null || uname -rs)
 CAPTURED=""
-if [[ -t 0 ]]; then
-    printf 'Grab clipboard? [Y/n] '
-    read -r -n 1 REPLY
-    printf '\n'
-    if [[ ! "$REPLY" =~ ^[nN]$ ]]; then
-        CAPTURED=$(pbpaste 2>/dev/null || true)
-    fi
-else
+if [[ $NOCLIP -eq 0 ]]; then
     CAPTURED=$(pbpaste 2>/dev/null || true)
 fi
 
-OUTFILE="$HOME/claude-busywork/new-nit-${TIMESTAMP}.md"
+# Same-second saves (scripted loops, rapid humans) still collide. Suffix the
+# name until unique, and track the final stamp so the template's rename steps
+# always match the file that actually landed on disk.
+NIT_STAMP="$TIMESTAMP"
+N=1
+OUTFILE_CANDIDATE="$HOME/claude-busywork/new-nit-${NIT_STAMP}.md"
+while [[ -e "$OUTFILE_CANDIDATE" ]]; do
+    N=$((N+1))
+    NIT_STAMP="${TIMESTAMP}-${N}"
+    OUTFILE_CANDIDATE="$HOME/claude-busywork/new-nit-${NIT_STAMP}.md"
+done
+OUTFILE="$OUTFILE_CANDIDATE"
 
 # Build AGENT_INSTRUCTIONS safely -- no heredoc expansion risk
 if [[ -n "$CAPTURED" ]]; then
@@ -130,7 +142,7 @@ copied to filename-autoAgenticNitFix-Backup.sh
 
 ## Document the list of files to be edited and their backup in this file
 
-## Create a filename-autoAgenticNitFix-proposed-changelog.md which has no more than 5 bullets of 5-20 words each about what is to be changed and why.  First bullet says "History and current status: <absolute path to nitfile>"
+## Create a filename-autoAgenticNitFix-proposed-changelog.md which has no more than 5 bullets of 5-20 words each about what is to be changed and why.  First bullet says "History and current status: <absolute path to nitfile>".  Second bullet says "Resolved by: log=<absolute path to done-nit-<nit timestamp>-agent.log> finished=<datetime>".  Do not self-report your model or mode; the launcher stamps those into the nitfile.  The agent log is the durable record of who worked this nit.
 
 ## Implement the changes
 
@@ -146,14 +158,11 @@ FOOTER
     printf '1/ Rename filename-autoAgenticNitFix-proposed-changelog.md to filename-autoAgenticNitFix-changelog.md\n'
     printf '2/ Update the NitFile status field issueStatus to DONE\n'
     printf '3/ Update the Nitfile status field whenFixed to %s at %s by <model>\n' "$DATE" "$TIME"
-    printf '4/ Rename the Nitfile from new-nit-%s.md to done-nit-%s.md\n' "$TIMESTAMP" "$TIMESTAMP"
-    printf '\n'
-    printf '## fixnit audit stamp: mode=standard agent=claude-sonnet-4-6 / direct pid=%s started=%s %s\n' "$$" "$DATE" "$TIME"
+    printf '4/ Rename the Nitfile from new-nit-%s.md to done-nit-%s.md\n' "$NIT_STAMP" "$NIT_STAMP"
+    printf '5/ Rename the agent log $HOME/claude-busywork/inprogress-nit-%s-agent.log to $HOME/claude-busywork/done-nit-%s-agent.log (if it exists)\n' "$NIT_STAMP" "$NIT_STAMP"
 } > "$OUTFILE"
 
 LINE_COUNT=$(printf '%s\n' "$CAPTURED" | wc -l | tr -d ' ')
 if [[ -n "$CAPTURED" ]]; then
     echo "Validated pbcopy got your clipboard: ${LINE_COUNT} lines"
 fi
-echo "Saved your nit: $OUTFILE"
-echo "Fix it now with: fixnit $(basename "$OUTFILE")"

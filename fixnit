@@ -2,7 +2,7 @@
 set -euo pipefail
 
 NITDIR="$HOME/claude-busywork"
-MODE="standard"
+MODE="lite"
 NITFILE=""
 ALL_MODE=0
 
@@ -13,10 +13,13 @@ ALL_MODE=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -lite|--lite) MODE="lite" ;;
+        -sonnet|--sonnet) MODE="sonnet" ;;
         all) ALL_MODE=1 ;;
         -h|--help)
-            echo "Usage: fixnit [-lite] [nitfile | all]"
-            echo "  no args   work the newest unassigned new-nit-*.md"
+            echo "Usage: fixnit [-sonnet] [nitfile | all]"
+            echo "  no args   work the newest unassigned new-nit-*.md (default: lite/LiteLLM);"
+            echo "            if none pending, adopt an orphaned inprogress-nit-* with no live agent"
+            echo "  -sonnet   use direct claude-sonnet instead of LiteLLM"
             echo "  nitfile   work that specific file (name or path)"
             echo "  all       spawn an agent for every new-nit-*.md in the queue"
             exit 0
@@ -35,8 +38,8 @@ done
 if [[ "$ALL_MODE" -eq 1 ]]; then
     count=0; skipped=0
     while IFS= read -r f; do
-        if [[ "$MODE" == "lite" ]]; then
-            if "$0" --lite "$f"; then (( ++count )); else (( ++skipped )); fi
+        if [[ "$MODE" == "sonnet" ]]; then
+            if "$0" --sonnet "$f"; then (( ++count )); else (( ++skipped )); fi
         else
             if "$0" "$f"; then (( ++count )); else (( ++skipped )); fi
         fi
@@ -44,10 +47,10 @@ if [[ "$ALL_MODE" -eq 1 ]]; then
     echo "all: launched $count agent(s), skipped $skipped (locked or DONE)"
     exit 0
 fi
-if [[ "$MODE" == "lite" ]]; then
-    AGENT_DESC="Kimi-K3-lab-claude-compatible[1m] / effort high / --bare / via LiteLLM"
-else
+if [[ "$MODE" == "sonnet" ]]; then
     AGENT_DESC="claude-sonnet-4-6 / direct"
+else
+    AGENT_DESC="Kimi-K3-lab-claude-compatible[1m] / effort high / --bare / via LiteLLM"
 fi
 
 if [[ -n "$NITFILE" ]]; then
@@ -62,7 +65,7 @@ if [[ -n "$NITFILE" ]]; then
     fi
 else
     # Nits currently assigned to a running agent (same trick checknit uses)
-    WORKING=$(pgrep -fl 'claude.*new-nit' 2>/dev/null | grep -oE "$NITDIR/new-nit-[0-9-]+\.md" || true)
+    WORKING=$(pgrep -fl 'claude.*(new|inprogress)-nit' 2>/dev/null | grep -oE "$NITDIR/(new-nit|inprogress-nit)-[0-9-]+\.md" || true)
 
     # Find most recent new-nit-*.md not internally marked DONE and not already being worked
     while IFS= read -r f; do
@@ -71,6 +74,20 @@ else
         NITFILE="$f"
         break
     done < <(ls -r "$NITDIR"/new-nit-*.md 2>/dev/null)
+
+    # Adopt stranded in-progress nits whose launcher died before completing them.
+    # An agent that exits instantly used to strand the nit forever, because
+    # selection only globbed new-nit-*. Skip terminal/waiting states and any
+    # nit with a live agent attached.
+    if [[ -z "$NITFILE" ]]; then
+        while IFS= read -r f; do
+            grep -qiE "Issue status: (DONE|QA|PENDINGHUMAN)" "$f" 2>/dev/null && continue
+            [[ -n "$WORKING" ]] && grep -qF "$f" <<< "$WORKING" && continue
+            NITFILE="$f"
+            echo "Adopting orphaned in-progress nit (no live agent): $f"
+            break
+        done < <(ls -r "$NITDIR"/inprogress-nit-*.md 2>/dev/null)
+    fi
 fi
 
 if [[ -z "$NITFILE" ]]; then
@@ -97,7 +114,21 @@ if (( ${#locks[@]} > 0 )); then
     exit 1
 fi
 
+# Lite-mode preflight BEFORE the claim-rename: a hard failure here (missing
+# CLI, expired token) must not strand the nit as inprogress-*.
+if [[ "$MODE" != "sonnet" ]]; then
+    if ! command -v lite >/dev/null 2>&1; then
+        echo "Missing 'lite' CLI. Install: pipx install 'litellm[proxy]', then: lite login" >&2
+        exit 1
+    fi
+    if lite auth print-token 2>&1 | grep -qiE 'expired|not logged|run.*login|login.*again|no.*token|unauthorized'; then
+        echo "LiteLLM token expired. Run: lite login" >&2
+        exit 1
+    fi
+fi
+
 # Rename marks the nit as claimed; skip for files already past that stage
+INPROGRESS=""
 if [[ $(basename "$NITFILE") == new-nit-* ]]; then
     INPROGRESS="${NITFILE/new-nit-/inprogress-nit-}"
     mv "$NITFILE" "$INPROGRESS"
@@ -115,29 +146,53 @@ echo "Agent: starting..."
 
 cd "$WORKDIR"
 
-if [[ "$MODE" == "lite" ]]; then
-    # Same launch shape as css-v3.sh -lite: LiteLLM proxy, Kimi K3, effort high.
-    if ! command -v lite >/dev/null 2>&1; then
-        echo "Missing 'lite' CLI. Install: pipx install 'litellm[proxy]', then: lite login" >&2
-        exit 1
-    fi
-    if lite auth print-token 2>&1 | grep -qiE 'expired|not logged|run.*login|login.*again|no.*token|unauthorized'; then
-        echo "LiteLLM token expired. Run: lite login" >&2
-        exit 1
-    fi
-    lite claude --bare --dangerously-skip-permissions \
+# A lite-mode parent session exports gateway vars (ANTHROPIC_AUTH_TOKEN /
+# ANTHROPIC_BASE_URL) that 403 a fresh claude launch -- stale token or dead
+# proxy. Scrub them before spawning either branch; each branch re-establishes
+# whatever auth it actually needs (OAuth config for direct claude, lite login
+# for LiteLLM).
+GATEWAY_SCRUB=(env -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_BASE_URL)
+
+if [[ "$MODE" == "sonnet" ]]; then
+    "${GATEWAY_SCRUB[@]}" \
+        claude --model claude-sonnet-4-6 --dangerously-skip-permissions \
+        -p "$PROMPT" \
+        >> "$LOGFILE" 2>&1 &
+else
+    # Default: LiteLLM proxy, Kimi K3, effort high (preflight done above,
+    # before the claim-rename).
+    "${GATEWAY_SCRUB[@]}" \
+        lite claude --bare --dangerously-skip-permissions \
         --model "Kimi-K3-lab-claude-compatible[1m]" --effort high \
         --settings '{"model":"Kimi-K3-lab-claude-compatible[1m]"}' \
         -p "$PROMPT" \
         >> "$LOGFILE" 2>&1 &
-else
-    claude --model claude-sonnet-4-6 --dangerously-skip-permissions \
-        -p "$PROMPT" \
-        >> "$LOGFILE" 2>&1 &
 fi
 
-echo "PID:   $!"
+AGENT_PID=$!
+echo "PID:   $AGENT_PID"
 
-# fixnit writes the audit stamp itself; agent self-reports are decorative
+# Instant-death guard: an agent that exits within seconds of launch (bad
+# token, gateway 403, missing CLI) used to strand the nit as inprogress-
+# forever. Verify the pid survived; if not, annotate the nit, roll the
+# claim-rename back so the nit is selectable again, and fail loudly. Check
+# process state: a dead-but-unreaped background child still satisfies
+# kill -0, so an empty ps row OR a zombie state both mean "instant exit".
+sleep 5
+AGENT_STATE=$(ps -o stat= -p "$AGENT_PID" 2>/dev/null || true)
+if [[ -z "$AGENT_STATE" || "$AGENT_STATE" == Z* ]]; then
+    echo "Agent exited within 5s of launch. Last log lines from $LOGFILE:" >&2
+    tail -n 15 "$LOGFILE" >&2 2>/dev/null || true
+    printf '\n## fixnit launch failed: pid=%s exited within 5s at %s (see %s); claim-rename rolled back\n' \
+        "$AGENT_PID" "$(date '+%Y-%m-%d %H:%M')" "$LOGFILE" >> "$NITFILE"
+    if [[ -n "$INPROGRESS" ]]; then
+        mv "$NITFILE" "${NITFILE/inprogress-nit-/new-nit-}"
+        echo "Rolled back rename: $HOME/claude-busywork/$(basename "${NITFILE/inprogress-nit-/new-nit-}")" >&2
+    fi
+    exit 1
+fi
+
+# fixnit writes the audit stamp itself, once the launch is proven healthy;
+# agent self-reports are decorative
 printf '\n## fixnit audit stamp: mode=%s agent=%s pid=%s started=%s\n' \
-    "$MODE" "$AGENT_DESC" "$!" "$(date '+%Y-%m-%d %H:%M')" >> "$NITFILE"
+    "$MODE" "$AGENT_DESC" "$AGENT_PID" "$(date '+%Y-%m-%d %H:%M')" >> "$NITFILE"

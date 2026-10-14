@@ -1,7 +1,7 @@
-# savenit - proposed changelog
+# savenit-autoAgenticNitFix proposed changelog
 
-- History and current status: /Users/hbaron/claude-busywork/inprogress-nit-2026-10-13-16-36.md
-- Always use interactive `read -r -e` on a terminal; shell rejects metachar args before savenit runs
-- Split heredoc into quoted static sections (`<< 'MARKER'`) to prevent content expansion
-- Use `printf '%s\n'` for all variable content (COMPLAINT, AGENT_INSTRUCTIONS) to handle any text
-- Remove unquoted heredoc that expanded backticks/`$(...)` in user-supplied complaint text
+- History and current status: /Users/hbaron/claude-busywork/inprogress-nit-2026-10-13-16-53.md
+- Remove `echo "Saved your nit: $OUTFILE"` line 158 — distracting output per user complaint
+- Remove `echo "Fix it now with: fixnit ..."` line 159 — same reason, unwanted noise
+- Retain clipboard validation echo (line 156) — that one is conditional and useful
+- No logic changes; pure output suppression, silent success is the new behavior
