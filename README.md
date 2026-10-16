@@ -1,45 +1,34 @@
 # savenit
 
-The nit pipeline. Complain, walk away, agents fix it.
+The nit pipeline. Complain, walk away, an agent fixes it.
 
-Commands live in the repo's `bin/` (put it on your PATH, see the install doc), one directory of state (`~/.local/state/savenit/`):
+One command, `nit`, in the repo's `bin/` (put `bin/` on your PATH). State lives in `~/.local/state/savenit/`.
 
 | Command | What it does |
 |---|---|
-| `savenit "complaint"` | Saves a timestamped nit file: your complaint, optional clipboard evidence, hostname, OS, invocation PWD. Never opens an editor. Save and move on. |
-| `fixnit` | Fires one background Sonnet agent at the newest unclaimed nit. `fixnit -lite` uses Kimi via LiteLLM in `--bare` mode. fixnit stamps its own audit line into the nit, launches from the complaint's PWD, and never doubles an in-flight nit. |
-| `checknit` | Reports working agents with PIDs and runtimes, the backlog, a full directory listing, tails logs of agents past 10 minutes, and offers to kill agents past 5. |
+| `nit "complaint"` | Saves a short nit file: your complaint, host, OS, the directory you were in. `-c` also attaches the clipboard. Never prompts when given args. |
+| `nit fix [-a] [id]` | Runs one background Claude agent on the newest nit (or `id`); `-a` works through the whole queue one at a time. Lite (LiteLLM) when available, else direct sonnet. |
+| `nit ls` | Read-only status: working, needs you, queued, recent fixes. |
+| `nit log [id]` | Tails an agent's log. |
+| `nit import` | Moves old-format `new-nit-*.md` files into the new queue. |
 
 ## Quick start
 
 ```bash
-savenit "zshrc alias stopped loading on new terminals"
-# → Saved your nit.  Fix it with fixnit.
-savenit -c "zshrc alias stopped loading"   # -c also attaches your clipboard (terminal output) as evidence
-# → Attached clipboard (-c): 4 lines
-fixnit -lite
-checknit
+nit "zshrc alias stopped loading on new terminals"
+# → Saved. Fix with: nit fix
+nit -c "this build error"        # attaches your clipboard (terminal output) as evidence
+nit fix
+nit ls
 ```
 
-The clipboard is read only when you pass `-c` (never silently). Then `savenit` appends the content to the nit file under
-`Captured output for context:` — so the agent that runs `fixnit` sees both your
-complaint and the raw terminal evidence:
+A nit moves through `new/` → `working/` → `done/` (or `needs-you/` when the agent has a question or the syntax check
+after the fix fails). The agent writes a short resolution and the list of files it changed into the nit; git is the
+backup and the changelog.
 
-```
-# Human prompt for the AI agent on what action to take:
-
-zshrc alias stopped loading on new terminals
-
-Captured output for context:
-% source ~/.zshrc
-zsh: command not found: myalias
-```
-
-A fixed nit renames itself from `new-nit-*` to `done-nit-*` with backup, changelog,
-and resolution summary attached.
+The older five commands (`savenit`, `fixnit`, `checknit`, `convoynit`, `auditnit`) are still in `bin/` while `nit` is
+being tried out.
 
 ## Install
-
-Full scripts, template, prerequisites, and behavior notes:
 
 [docs/how-to-install-savenit.md](docs/how-to-install-savenit.md)
