@@ -2,7 +2,7 @@
 
 The nit pipeline. Complain, walk away, agents fix it.
 
-Three commands, all in `~/bin`, one directory of state (`~/claude-busywork/`):
+Three commands, all in `~/bin`, one directory of state (`~/.local/state/savenit/`):
 
 | Command | What it does |
 |---|---|

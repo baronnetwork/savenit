@@ -25,7 +25,16 @@ set -euo pipefail
 #   --dry-run  print the selected done-nits, launch nothing
 # Test hooks (env): NITDIR, LITE, CLAUDE_BIN
 
-NITDIR="${NITDIR:-$HOME/claude-busywork}"
+# Nit state dir. Default ${XDG_STATE_HOME:-~/.local/state}/savenit (was ~/claude-busywork, migrated on first
+# run when no agent is in flight). Override with NITDIR.
+if [[ -z "${NITDIR:-}" ]]; then
+    _NIT_NEW="${XDG_STATE_HOME:-$HOME/.local/state}/savenit"; _NIT_OLD="$HOME/claude-busywork"
+    if [[ -d "$_NIT_OLD" && ! -e "$_NIT_NEW" ]] && ! pgrep -f 'claude.*(new|inprogress)-nit' >/dev/null 2>&1; then
+        mkdir -p "$(dirname "$_NIT_NEW")" && mv "$_NIT_OLD" "$_NIT_NEW" && echo "savenit: moved $_NIT_OLD -> $_NIT_NEW" >&2
+    fi
+    if [[ -d "$_NIT_NEW" || ! -d "$_NIT_OLD" ]]; then NITDIR="$_NIT_NEW"; else NITDIR="$_NIT_OLD"; fi   # old dir stays in use while agents run
+fi
+mkdir -p "$NITDIR"
 K=10
 MODE="lite"
 DRY=0

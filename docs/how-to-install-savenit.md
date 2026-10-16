@@ -8,7 +8,7 @@ unfinished nit, one per run. You save the nit and move on; the agent does the fi
 ```mermaid
 flowchart LR
     A[Something annoys you] -->|Cmd+C the output| B[savenit "complaint"]
-    B -->|writes nit file| C[~/claude-busywork/new-nit-DATE-TIME.md]
+    B -->|writes nit file| C[~/.local/state/savenit/new-nit-DATE-TIME.md]
     C -->|you run| D[fixnit]
     D -->|background Sonnet agent| E[Agent fixes it, logs, marks DONE]
     E --> F[done-nit-DATE-TIME.md]
@@ -19,12 +19,12 @@ flowchart LR
 | What | Path |
 |---|---|
 | Scripts (all three) | In the repo checkout, e.g. `~/consulting/savenit/savenit` (also `fixnit`, `checknit`) |
-| Nit template (reference) | `~/claude-busywork/new-nit-template.txt` |
-| Nit working directory | `~/claude-busywork/` |
-| New nits | `~/claude-busywork/new-nit-YYYY-MM-DD-HH-MM-SS.md` (collision suffix `-N` if the same second matches) |
-| In-progress nits | `~/claude-busywork/inprogress-nit-YYYY-MM-DD-HH-MM-SS.md` |
-| Finished nits | `~/claude-busywork/done-nit-YYYY-MM-DD-HH-MM-SS.md` (checknit shelves these into `done-nits/`) |
-| Agent logs | `~/claude-busywork/inprogress-nit-<timestamp>-agent.log`, renamed `done-nit-...` on completion |
+| Nit template (reference) | `~/.local/state/savenit/new-nit-template.txt` |
+| Nit working directory | `~/.local/state/savenit/` |
+| New nits | `~/.local/state/savenit/new-nit-YYYY-MM-DD-HH-MM-SS.md` (collision suffix `-N` if the same second matches) |
+| In-progress nits | `~/.local/state/savenit/inprogress-nit-YYYY-MM-DD-HH-MM-SS.md` |
+| Finished nits | `~/.local/state/savenit/done-nit-YYYY-MM-DD-HH-MM-SS.md` (checknit shelves these into `done-nits/`) |
+| Agent logs | `~/.local/state/savenit/inprogress-nit-<timestamp>-agent.log`, renamed `done-nit-...` on completion |
 
 ## Prerequisites
 
@@ -59,7 +59,7 @@ flowchart LR
 
 ```bash
 git clone git@github.com:baronnetwork/savenit.git ~/consulting/savenit
-mkdir -p ~/claude-busywork
+mkdir -p ~/.local/state/savenit
 ```
 
 The scripts ARE the repo files; PATH points at the checkout directly, so there
@@ -111,7 +111,7 @@ else
     # Non-interactive stdin: keep original copy-then-command behavior
     CAPTURED=$(pbpaste 2>/dev/null || true)
 fi
-OUTFILE="$HOME/claude-busywork/new-nit-${TIMESTAMP}.md"
+OUTFILE="${XDG_STATE_HOME:-$HOME/.local/state}/savenit/new-nit-${TIMESTAMP}.md"
 
 AGENT_INSTRUCTIONS="${COMPLAINT}"
 if [[ -n "$CAPTURED" ]]; then
@@ -217,7 +217,7 @@ echo "Saved your nit.  Fix it with fixnit."
 #!/usr/bin/env bash
 set -euo pipefail
 
-NITDIR="$HOME/claude-busywork"
+NITDIR="${XDG_STATE_HOME:-$HOME/.local/state}/savenit"
 MODE="standard"
 [[ "${1:-}" == "-lite" || "${1:-}" == "--lite" ]] && MODE="lite"
 if [[ "$MODE" == "lite" ]]; then
@@ -296,7 +296,7 @@ not the keychain (bare never reads OAuth/keychain). Requires the `lite` CLI
 (`pipx install 'litellm[proxy]'`) and a live token (`lite login` when
 `lite auth print-token` says otherwise).
 
-## 3. ~/claude-busywork/new-nit-template.txt
+## 3. ~/.local/state/savenit/new-nit-template.txt
 
 The reference template the nit file format is based on. `savenit` embeds this
 structure in its heredoc, so this file is documentation and a design reference,
@@ -399,7 +399,7 @@ the queue. No state files: the process table is the source of truth.
 #!/usr/bin/env bash
 set -euo pipefail
 
-NITDIR="$HOME/claude-busywork"
+NITDIR="${XDG_STATE_HOME:-$HOME/.local/state}/savenit"
 
 etime_human() {
     # ps etime formats: mm:ss, hh:mm:ss, dd-hh:mm:ss
@@ -558,8 +558,8 @@ Output:
 
 ```text
 Mode:  standard
-Nit:   /Users/you/claude-busywork/inprogress-nit-2026-10-13-14-47-12.md
-Log:   /Users/you/claude-busywork/inprogress-nit-2026-10-13-14-47-12-agent.log
+Nit:   /Users/you/.local/state/savenit/inprogress-nit-2026-10-13-14-47-12.md
+Log:   /Users/you/.local/state/savenit/inprogress-nit-2026-10-13-14-47-12-agent.log
 From:  /Users/you/some-project
 Agent: starting...
 PID:   84231
@@ -601,13 +601,13 @@ Output, live example:
 ```text
 # Working (1)
 
-PID 50892  running 2 min  /Users/you/claude-busywork/new-nit-2026-10-13-15-38.md
-    log:   /Users/you/claude-busywork/new-nit-2026-10-13-15-38-agent.log
+PID 50892  running 2 min  /Users/you/.local/state/savenit/new-nit-2026-10-13-15-38.md
+    log:   /Users/you/.local/state/savenit/new-nit-2026-10-13-15-38-agent.log
 
 # Backlog (2)
 
-2026-10-13 15:37  /Users/you/claude-busywork/new-nit-2026-10-13-15-37.md
-2026-10-13 15:36  /Users/you/claude-busywork/new-nit-2026-10-13-15-36.md
+2026-10-13 15:37  /Users/you/.local/state/savenit/new-nit-2026-10-13-15-37.md
+2026-10-13 15:36  /Users/you/.local/state/savenit/new-nit-2026-10-13-15-36.md
 
 Interrupt an agent:  kill <PID>
 Work the next nit:   fixnit
@@ -644,5 +644,5 @@ deliberately rejected for this reason; revisit once the workflow earns trust.
 ```bash
 rm -rf ~/consulting/savenit          # the repo checkout holds all three scripts
 # remove the PATH export from ~/.zshenv and ~/.bashrc
-# keep or delete ~/claude-busywork as you see fit
+# keep or delete ~/.local/state/savenit as you see fit
 ```

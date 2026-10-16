@@ -41,13 +41,23 @@ fi
 # Same-second saves (scripted loops, rapid humans) still collide. Suffix the
 # name until unique, and track the final stamp so the template's rename steps
 # always match the file that actually landed on disk.
+# Nit state dir. Default ${XDG_STATE_HOME:-~/.local/state}/savenit (was ~/claude-busywork, migrated on first
+# run when no agent is in flight). Override with NITDIR.
+if [[ -z "${NITDIR:-}" ]]; then
+    _NIT_NEW="${XDG_STATE_HOME:-$HOME/.local/state}/savenit"; _NIT_OLD="$HOME/claude-busywork"
+    if [[ -d "$_NIT_OLD" && ! -e "$_NIT_NEW" ]] && ! pgrep -f 'claude.*(new|inprogress)-nit' >/dev/null 2>&1; then
+        mkdir -p "$(dirname "$_NIT_NEW")" && mv "$_NIT_OLD" "$_NIT_NEW" && echo "savenit: moved $_NIT_OLD -> $_NIT_NEW" >&2
+    fi
+    if [[ -d "$_NIT_NEW" || ! -d "$_NIT_OLD" ]]; then NITDIR="$_NIT_NEW"; else NITDIR="$_NIT_OLD"; fi   # old dir stays in use while agents run
+fi
+mkdir -p "$NITDIR"
 NIT_STAMP="$TIMESTAMP"
 N=1
-OUTFILE_CANDIDATE="$HOME/claude-busywork/new-nit-${NIT_STAMP}.md"
+OUTFILE_CANDIDATE="$NITDIR/new-nit-${NIT_STAMP}.md"
 while [[ -e "$OUTFILE_CANDIDATE" ]]; do
     N=$((N+1))
     NIT_STAMP="${TIMESTAMP}-${N}"
-    OUTFILE_CANDIDATE="$HOME/claude-busywork/new-nit-${NIT_STAMP}.md"
+    OUTFILE_CANDIDATE="$NITDIR/new-nit-${NIT_STAMP}.md"
 done
 OUTFILE="$OUTFILE_CANDIDATE"
 
@@ -159,7 +169,7 @@ FOOTER
     printf '2/ Update the NitFile status field issueStatus to DONE\n'
     printf '3/ Update the Nitfile status field whenFixed to %s at %s by <model>\n' "$DATE" "$TIME"
     printf '4/ Rename the Nitfile from new-nit-%s.md to done-nit-%s.md\n' "$NIT_STAMP" "$NIT_STAMP"
-    printf '5/ Rename the agent log $HOME/claude-busywork/inprogress-nit-%s-agent.log to $HOME/claude-busywork/done-nit-%s-agent.log (if it exists)\n' "$NIT_STAMP" "$NIT_STAMP"
+    printf '5/ Rename the agent log %s/inprogress-nit-%s-agent.log to %s/done-nit-%s-agent.log (if it exists)\n' "$NITDIR" "$NIT_STAMP" "$NITDIR" "$NIT_STAMP"
 } > "$OUTFILE"
 
 LINE_COUNT=$(printf '%s\n' "$CAPTURED" | wc -l | tr -d ' ')
