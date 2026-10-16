@@ -2,7 +2,7 @@
 
 The nit pipeline. Complain, walk away, agents fix it.
 
-Three commands, all in `~/bin`, one directory of state (`~/.local/state/savenit/`):
+Commands live in the repo's `bin/` (put it on your PATH, see the install doc), one directory of state (`~/.local/state/savenit/`):
 
 | Command | What it does |
 |---|---|

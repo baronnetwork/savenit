@@ -18,7 +18,7 @@ flowchart LR
 
 | What | Path |
 |---|---|
-| Scripts (all three) | In the repo checkout, e.g. `~/consulting/savenit/savenit` (also `fixnit`, `checknit`) |
+| Scripts | In the repo's `bin/`, e.g. `~/consulting/savenit/bin/savenit` (also `fixnit`, `checknit`, `convoynit`, `auditnit`) |
 | Nit template (reference) | `~/.local/state/savenit/new-nit-template.txt` |
 | Nit working directory | `~/.local/state/savenit/` |
 | New nits | `~/.local/state/savenit/new-nit-YYYY-MM-DD-HH-MM-SS.md` (collision suffix `-N` if the same second matches) |
@@ -30,7 +30,7 @@ flowchart LR
 
 1. macOS (uses `pbpaste` and `sw_vers`).
 2. The `claude` CLI installed and authenticated.
-3. The repo checkout on your `$PATH`, exported where each shell family actually
+3. The repo's `bin/` directory on your `$PATH`, exported where each shell family actually
    looks. Check with `echo $PATH | tr ':' '\n' | grep savenit`.
 
    **zsh: `~/.zshenv` is the canonical file.** It is sourced by every zsh:
@@ -52,17 +52,17 @@ flowchart LR
    Idempotent export line for both shells:
 
    ```bash
-   if [[ ":$PATH:" != *":$HOME/consulting/savenit:"* ]]; then export PATH="$HOME/consulting/savenit:$PATH"; fi
+   if [[ ":$PATH:" != *":$HOME/consulting/savenit/bin:"* ]]; then export PATH="$HOME/consulting/savenit/bin:$PATH"; fi
    ```
 
 ## Install
 
 ```bash
-git clone git@github.com:baronnetwork/savenit.git ~/consulting/savenit
+git clone git@github-baron:baronnetwork/savenit.git ~/consulting/savenit   # github-baron = baronnetwork SSH alias (see spicebaron-git skill)
 mkdir -p ~/.local/state/savenit
 ```
 
-The scripts ARE the repo files; PATH points at the checkout directly, so there
+The scripts ARE the repo files; PATH points at the checkout's `bin/` directly, so there
 are no symlinks or copies to keep in sync. The full script snapshots inline in
 sections 1/2/4 below are historical reference — the repo files are authoritative.
 
