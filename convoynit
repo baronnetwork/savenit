@@ -22,7 +22,9 @@ set -euo pipefail
 # Test hooks (env): NITDIR, FIXNIT, CONVOY_POLL (seconds between idle polls)
 
 NITDIR="${NITDIR:-$HOME/claude-busywork}"
-FIXNIT="${FIXNIT:-/Users/hbaron/consulting/savenit/fixnit}"
+# Default to the fixnit that sits next to this script (resolving symlinks), so it works from any checkout.
+_SELF="$0"; while [[ -L "$_SELF" ]]; do _T="$(readlink "$_SELF")"; [[ "$_T" == /* ]] && _SELF="$_T" || _SELF="$(dirname "$_SELF")/$_T"; done
+FIXNIT="${FIXNIT:-$(cd "$(dirname "$_SELF")" && pwd)/fixnit}"
 POLL="${CONVOY_POLL:-5}"
 
 MODE_ARGS=()
