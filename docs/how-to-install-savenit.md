@@ -518,16 +518,16 @@ fi
 # 1. Copy the offending output first (Cmd+C), then:
 savenit "zshrc alias is not loading on new terminals"
 
-# Instruction-only nit, clipboard skipped:
-savenit -n "add a cust alias for customer-projects"
+# Instruction-only nit (clipboard is never read unless -c):
+savenit "add a cust alias for customer-projects"
 
 # Bare invocation asks once for the complaint (the metachar-safe path):
 savenit
 ```
 
-Zero prompts when args are given. The clipboard is grabbed automatically via
-`pbpaste` unless `-n` / `--no-clip` skips it. Output is at most one line —
-`Validated pbcopy got your clipboard: N lines`, only when the clipboard had
+Zero prompts when args are given. The clipboard is read only with `-c` / `--clip` (via
+`pbpaste`, `wl-paste`, `xclip`, `xsel` or `powershell.exe`; `-n` is accepted and ignored). Output is at most one line —
+`Attached clipboard (-c): N lines`, only when the clipboard had
 content. Fire-and-forget by design: save the nit, move on.
 
 Behavior notes:

@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Zero-friction by design: args are the complaint, the clipboard is grabbed
-# automatically, and nothing ever prompts when args are present. -n skips the
-# clipboard grab for the rare stale-clipboard case. Bare interactive runs get
-# a complaint prompt only, since unquoted metacharacters (', `, <, >, \) never
-# survive the shell long enough to become args anyway.
-NOCLIP=0
-if [[ "${1:-}" == "-n" || "${1:-}" == "--no-clip" ]]; then
-    NOCLIP=1
+# Zero-friction by design: args are the complaint and nothing ever prompts when args are present.
+# The clipboard is read ONLY with -c (never silently): savenit -c "complaint". Bare interactive runs
+# get a complaint prompt only, since unquoted metacharacters (', `, <, >, \) never survive the
+# shell long enough to become args anyway. (-n / --no-clip is accepted and ignored: it is the default.)
+CLIP=0
+while [[ "${1:-}" == -c || "${1:-}" == --clip || "${1:-}" == -n || "${1:-}" == --no-clip ]]; do
+    [[ "$1" == -c || "$1" == --clip ]] && CLIP=1
     shift
-fi
+done
+
+clip_read() {
+    pbpaste 2>/dev/null || wl-paste -n 2>/dev/null || xclip -selection clipboard -o 2>/dev/null \
+        || xsel -ob 2>/dev/null || powershell.exe -NoProfile -Command Get-Clipboard 2>/dev/null | tr -d '\r'
+}
 
 if [[ $# -gt 0 ]]; then
     COMPLAINT="$*"
@@ -18,11 +22,11 @@ elif [[ -t 0 ]]; then
     printf 'What is annoying you? '
     read -r -e COMPLAINT
     if [[ -z "$COMPLAINT" ]]; then
-        echo "Usage: savenit [-n]   (type your complaint at the prompt; -n skips clipboard)" >&2
+        echo "Usage: savenit [-c] ["complaint"]   (-c attaches the clipboard)" >&2
         exit 1
     fi
 else
-    echo "Usage: savenit [-n]   (type your complaint at the prompt; -n skips clipboard)" >&2
+    echo "Usage: savenit [-c] ["complaint"]   (-c attaches the clipboard)" >&2
     exit 1
 fi
 
@@ -34,8 +38,9 @@ TIMESTAMP="${DATE}-$(date '+%H-%M-%S')"
 HOST=$(hostname)
 OS_TYPE=$(sw_vers -productVersion 2>/dev/null || uname -rs)
 CAPTURED=""
-if [[ $NOCLIP -eq 0 ]]; then
-    CAPTURED=$(pbpaste 2>/dev/null || true)
+if [[ $CLIP -eq 1 ]]; then
+    CAPTURED=$(clip_read || true)
+    [[ -n "$CAPTURED" ]] || echo "savenit: -c given but the clipboard is empty or unreadable (need pbpaste, wl-paste, xclip, xsel or powershell.exe)" >&2
 fi
 
 # Same-second saves (scripted loops, rapid humans) still collide. Suffix the
@@ -174,5 +179,5 @@ FOOTER
 
 LINE_COUNT=$(printf '%s\n' "$CAPTURED" | wc -l | tr -d ' ')
 if [[ -n "$CAPTURED" ]]; then
-    echo "Validated pbcopy got your clipboard: ${LINE_COUNT} lines"
+    echo "Attached clipboard (-c): ${LINE_COUNT} lines"
 fi

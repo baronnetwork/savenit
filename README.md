@@ -14,16 +14,14 @@ Commands live in the repo's `bin/` (put it on your PATH, see the install doc), o
 
 ```bash
 savenit "zshrc alias stopped loading on new terminals"
-# → Grab clipboard? [Y/n]
-#   Press Enter (or Y) to paste your terminal output as agent context.
-#   Press n to skip.
-#   → Validated pbcopy got your clipboard: 4 lines
-#   → Saved your nit.  Fix it with fixnit.
+# → Saved your nit.  Fix it with fixnit.
+savenit -c "zshrc alias stopped loading"   # -c also attaches your clipboard (terminal output) as evidence
+# → Attached clipboard (-c): 4 lines
 fixnit -lite
 checknit
 ```
 
-When you grab the clipboard, `savenit` appends the content to the nit file under
+The clipboard is read only when you pass `-c` (never silently). Then `savenit` appends the content to the nit file under
 `Captured output for context:` — so the agent that runs `fixnit` sees both your
 complaint and the raw terminal evidence:
 
