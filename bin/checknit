@@ -125,11 +125,30 @@ while IFS= read -r line; do
     etime=$(ps -o etime= -p "$pid" 2>/dev/null | tr -d ' ')
     esecs=$(etime_seconds "$pid")
     (( esecs > 300 )) && S_PIDS+=("$pid")
-    stamp=$(short_stamp "$(nit_stamp_file "$nit")")
+    raw_stamp=$(nit_stamp_file "$nit")
+    stamp=$(short_stamp "$raw_stamp")
     mode=$(nit_mode "$nit")
+    # Agent log stats: line count plus last-write time, resolved from the nit
+    # stamp (fixnit names the log <nitfile minus .md>-agent.log at launch).
+    # The newest mtime is the "is this agent still moving" signal the human
+    # asked to see next to PID and mode.
+    logfile=""
+    for p in inprogress-nit new-nit done-nit; do
+        [[ -f "$NITDIR/${p}-${raw_stamp}-agent.log" ]] && { logfile="$NITDIR/${p}-${raw_stamp}-agent.log"; break; }
+    done
+    if [[ -n "$logfile" ]]; then
+        loglines=$(wc -l < "$logfile" | tr -d ' ')
+        logmt=$(stat -f %Sm -t '%Y-%m-%d %H:%M:%S' "$logfile" 2>/dev/null || true)
+        if [[ "${logmt:0:10}" == "$TODAY" ]]; then logts="${logmt:11}"
+        elif [[ -n "$logmt" ]]; then logts="${logmt:0:16}"
+        else logts="?"; fi
+        logtail=", log ${loglines} lines, last ${logts}"
+    else
+        logtail=", log n/a"
+    fi
     tail=" (PID ${pid}"
     [[ -n "$mode" ]] && tail+=", mode ${mode}"
-    tail+=")"
+    tail+="${logtail})"
     (( esecs > 600 )) && tail+=" STALE $(etime_human "${etime:-00:00}")"
     needs_you "$nit" && tail+=" ⚑"
     I_LINES+=("$(queue_line in-flight "$stamp" "$(first_complaint "$nit")" "$tail")")

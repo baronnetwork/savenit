@@ -30,5 +30,5 @@ venv/
 # local-only project scaffolding
 old-backups/
 
-# agent-made restore copies (local only)
-*-autoAgenticNitFix-Backup*
+# agent-made restore copies and changelogs (local only)
+*autoAgenticNitFix*
